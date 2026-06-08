@@ -1,0 +1,31 @@
+name: exomol-opacity-app
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      EXOMOL_JOBS_DIR: /data/jobs
+      TAUREX_H5_CACHE_DIR: /data/opacities
+      EXOCROSS_AUTO_RUN: "false"
+    ports:
+      - "8000:8000"
+    volumes:
+      - exomol_jobs:/data/jobs
+      - exomol_opacity_cache:/data/opacities
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+volumes:
+  exomol_jobs:
+  exomol_opacity_cache:

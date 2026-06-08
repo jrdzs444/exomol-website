@@ -10,12 +10,19 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.analysis_frontend_build/
+.analysis_jobs/
 *.local
 
 # Python/backend runtime files
+.venv/
+.python_deps/
 backend/venv/
 backend/__pycache__/
+backend/tests/__pycache__/
 backend/exomol_data/
+backend/opacity_data/
+*.h5
 *.pyc
 .env
 

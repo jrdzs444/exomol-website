@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 async function request(path, options = {}) {
   let response;
@@ -27,6 +27,37 @@ async function request(path, options = {}) {
 
 export function getOptions() {
   return request("/api/options");
+}
+
+export function getOpacityCatalog() {
+  return request("/api/opacities/catalog");
+}
+
+export function getOpacityDatasets(molecule) {
+  const query = new URLSearchParams({ molecule });
+  return request(`/api/opacities/datasets?${query}`);
+}
+
+export function getOpacityOptions({ molecule, datasetKey }) {
+  const query = new URLSearchParams({ molecule, datasetKey });
+  return request(`/api/opacities/options?${query}`);
+}
+
+export function getOpacitySpectrum({
+  molecule,
+  datasetKey,
+  temperature,
+  pressure,
+  maxPoints,
+}) {
+  const query = new URLSearchParams({
+    molecule,
+    datasetKey,
+    temperature: String(temperature),
+    pressure: String(pressure),
+    maxPoints: String(maxPoints),
+  });
+  return request(`/api/opacities/spectrum?${query}`);
 }
 
 export function submitJob(payload) {

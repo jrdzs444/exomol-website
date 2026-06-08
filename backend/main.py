@@ -15,10 +15,25 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+try:
+    from .opacity import get_opacity_options, get_opacity_spectrum
+    from .opacity_catalog import (
+        discover_opacity_molecules,
+        discover_taurex_datasets,
+        download_taurex_file,
+    )
+except ImportError:
+    from opacity import get_opacity_options, get_opacity_spectrum
+    from opacity_catalog import (
+        discover_opacity_molecules,
+        discover_taurex_datasets,
+        download_taurex_file,
+    )
 
 
 def get_default_jobs_dir() -> Path:
@@ -56,6 +71,14 @@ EXOCROSS_EXE = Path(os.environ["EXOCROSS_EXE"]) if os.environ.get("EXOCROSS_EXE"
 EXOCROSS_TIMEOUT_SECONDS = int(os.environ.get("EXOCROSS_TIMEOUT_SECONDS", "180"))
 AUTO_RUN_ON_SUBMIT = env_bool("EXOCROSS_AUTO_RUN", True)
 DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("EXOMOL_DOWNLOAD_TIMEOUT_SECONDS", "180"))
+TAUREX_H5_FILE = (
+    Path(os.environ["TAUREX_H5_FILE"])
+    if os.environ.get("TAUREX_H5_FILE")
+    else BASE_DIR / "opacity_data" / "opacity.h5"
+)
+TAUREX_H5_CACHE_DIR = Path(
+    os.environ.get("TAUREX_H5_CACHE_DIR", str(BASE_DIR / "opacity_data"))
+)
 
 JOBS_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +91,7 @@ MASS_OVERRIDES: dict[tuple[str, str, str], float] = {
     ("NaH", "23Na-1H", "Rivlin"): 23.997594,
 }
 
-app = FastAPI(title="ExoMol Opacity App API", version="0.4.0")
+app = FastAPI(title="ExoMol Opacity App API", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -741,6 +764,8 @@ def root() -> dict:
             "masterFile": catalog["masterFile"],
             "exocrossExe": str(EXOCROSS_EXE) if EXOCROSS_EXE else None,
             "datasetBaseUrl": EXOMOL_DATASET_BASE,
+            "taurexOpacityFile": str(TAUREX_H5_FILE),
+            "taurexOpacityFileAvailable": TAUREX_H5_FILE.is_file(),
         }
     except Exception as exc:
         return {
@@ -756,6 +781,164 @@ def get_options() -> dict:
         return get_catalog_payload()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load EXOMOL.master: {exc}")
+
+
+def configured_taurex_matches(dataset: dict) -> bool:
+    if not TAUREX_H5_FILE.is_file():
+        return False
+
+    try:
+        options = get_opacity_options(TAUREX_H5_FILE)
+    except (OSError, ValueError):
+        return False
+
+    return (
+        options.get("molecule") == dataset["molecule"].replace("_p", "+")
+        and options.get("dataset") == dataset["dataset"]
+    )
+
+
+def resolve_taurex_file(
+    molecule: str | None = None,
+    dataset_key: str | None = None,
+) -> tuple[Path, dict | None]:
+    if molecule is None and dataset_key is None:
+        if TAUREX_H5_FILE.is_file():
+            return TAUREX_H5_FILE, None
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TauREx opacity file is not configured. Set TAUREX_H5_FILE "
+                "to the path of a .h5 opacity file."
+            ),
+        )
+
+    if not molecule or not dataset_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Both molecule and datasetKey are required.",
+        )
+
+    try:
+        datasets = discover_taurex_datasets(molecule)
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to read the ExoMol opacity catalogue: {exc}",
+        ) from exc
+
+    dataset = next(
+        (item for item in datasets if item["key"] == dataset_key),
+        None,
+    )
+    if dataset is None:
+        raise HTTPException(
+            status_code=404,
+            detail="The selected TauREx opacity dataset was not found.",
+        )
+
+    if configured_taurex_matches(dataset):
+        return TAUREX_H5_FILE, dataset
+
+    try:
+        return download_taurex_file(dataset, TAUREX_H5_CACHE_DIR), dataset
+    except (OSError, requests.RequestException) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to download the selected TauREx file: {exc}",
+        ) from exc
+
+
+@app.get("/api/opacities/catalog")
+def get_taurex_opacity_catalog() -> dict:
+    try:
+        molecules = discover_opacity_molecules()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to read the ExoMol opacity catalogue: {exc}",
+        ) from exc
+
+    catalog_labels = {
+        molecule["key"].replace("+", "_p"): molecule["label"]
+        for molecule in load_catalog()["molecules"]
+    }
+    for molecule in molecules:
+        molecule["label"] = catalog_labels.get(
+            molecule["key"],
+            molecule["label"],
+        )
+
+    return {
+        "molecules": molecules,
+        "source": f"{os.environ.get('EXOMOL_OPACITY_BASE', 'https://exomol.com/data/data-types/opacity').rstrip('/')}/",
+    }
+
+
+@app.get("/api/opacities/datasets")
+def get_taurex_opacity_datasets(molecule: str = Query(min_length=1)) -> dict:
+    try:
+        datasets = discover_taurex_datasets(molecule)
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to read opacity datasets for {molecule}: {exc}",
+        ) from exc
+
+    return {
+        "molecule": molecule,
+        "datasets": datasets,
+    }
+
+
+@app.get("/api/opacities/options")
+def get_taurex_opacity_options(
+    molecule: str | None = Query(None),
+    dataset_key: str | None = Query(None, alias="datasetKey"),
+) -> dict:
+    opacity_file, dataset = resolve_taurex_file(molecule, dataset_key)
+    try:
+        payload = get_opacity_options(opacity_file)
+        if dataset:
+            payload.update(
+                {
+                    "datasetKey": dataset["key"],
+                    "sourceUrl": dataset["url"],
+                    "configuration": dataset["configuration"],
+                }
+            )
+        return payload
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read TauREx opacity file: {exc}",
+        ) from exc
+
+
+@app.get("/api/opacities/spectrum")
+def get_taurex_opacity_spectrum(
+    temperature: float = Query(gt=0),
+    pressure: float = Query(gt=0),
+    max_points: int = Query(5000, alias="maxPoints", ge=100, le=20000),
+    molecule: str | None = Query(None),
+    dataset_key: str | None = Query(None, alias="datasetKey"),
+) -> dict:
+    opacity_file, dataset = resolve_taurex_file(molecule, dataset_key)
+    try:
+        payload = get_opacity_spectrum(
+            opacity_file,
+            temperature=temperature,
+            pressure=pressure,
+            max_points=max_points,
+        )
+        if dataset:
+            payload["datasetKey"] = dataset["key"]
+        return payload
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read TauREx opacity spectrum: {exc}",
+        ) from exc
 
 
 @app.post("/api/submit")
