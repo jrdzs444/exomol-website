@@ -23,6 +23,7 @@ backend/tests/__pycache__/
 backend/exomol_data/
 backend/opacity_data/
 *.h5
+*.tar
 *.pyc
 .env
 

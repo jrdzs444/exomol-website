@@ -8,8 +8,7 @@ services:
       EXOMOL_JOBS_DIR: /data/jobs
       TAUREX_H5_CACHE_DIR: /data/opacities
       EXOCROSS_AUTO_RUN: "false"
-    ports:
-      - "8000:8000"
+      EXOCROSS_JOB_BUILDER_ENABLED: "false"
     volumes:
       - exomol_jobs:/data/jobs
       - exomol_opacity_cache:/data/opacities
@@ -19,6 +18,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
     depends_on:
       backend:
         condition: service_healthy

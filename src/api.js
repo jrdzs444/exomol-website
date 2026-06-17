@@ -1,4 +1,8 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const basePath =
+  import.meta.env.BASE_URL === "/"
+    ? ""
+    : import.meta.env.BASE_URL.replace(/\/$/, "");
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? basePath;
 
 async function request(path, options = {}) {
   let response;

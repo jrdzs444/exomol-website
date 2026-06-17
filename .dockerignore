@@ -4,6 +4,7 @@
 node_modules
 dist
 *.log
+*.tar
 *.h5
 *.pyc
 __pycache__
