@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
+import h5py
 import requests
 from bs4 import BeautifulSoup
 
@@ -21,6 +22,57 @@ HTTP_HEADERS = {
     "User-Agent": "ExoMol-Opacity-App/0.5 (+local development)"
 }
 SAFE_SLUG = re.compile(r"^[A-Za-z0-9_+\-]+$")
+TAUREX_SUFFIX = ".xsec.TauREx.h5"
+EXOMOL_OPACITY_DATA_DIR = (
+    Path(os.environ["EXOMOL_OPACITY_DATA_DIR"]).expanduser()
+    if os.environ.get("EXOMOL_OPACITY_DATA_DIR")
+    else None
+)
+
+
+def configured_local_data_dir() -> Path | None:
+    if EXOMOL_OPACITY_DATA_DIR is None:
+        return None
+    if not EXOMOL_OPACITY_DATA_DIR.is_dir():
+        raise ValueError(
+            "EXOMOL_OPACITY_DATA_DIR does not exist or is not a directory: "
+            f"{EXOMOL_OPACITY_DATA_DIR}"
+        )
+    return EXOMOL_OPACITY_DATA_DIR
+
+
+def catalog_source() -> str:
+    local_dir = configured_local_data_dir()
+    if local_dir is not None:
+        return str(local_dir)
+    return f"{EXOMOL_OPACITY_BASE}/"
+
+
+def label_to_key(label: str) -> str:
+    return label.replace("+", "_p")
+
+
+def decode_hdf5_scalar(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def read_hdf5_text(handle: h5py.File, name: str) -> str | None:
+    if name not in handle:
+        return None
+
+    value = handle[name][()]
+    if hasattr(value, "size") and value.size == 0:
+        return None
+    if hasattr(value, "flat"):
+        value = value.flat[0]
+    return decode_hdf5_scalar(value)
+
+
+def parse_configuration(filename: str) -> str:
+    match = re.search(r"(?:\.|__)(R\d.+)\.xsec\.TauREx\.h5$", filename)
+    return match.group(1) if match else filename
 
 
 def fetch_html(url: str) -> str:
@@ -73,19 +125,16 @@ def parse_taurex_files(
     for tag in soup.find_all("a", href=True):
         absolute_url = urljoin(page_url, tag["href"].strip())
         filename = unquote(Path(urlparse(absolute_url).path).name)
-        if filename.endswith(".xsec.TauREx.h5"):
+        parsed = urlparse(absolute_url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if parsed.netloc != urlparse(page_url).netloc:
+            continue
+        if filename.endswith(TAUREX_SUFFIX):
             found[filename] = absolute_url
 
     datasets = []
     for filename, url in sorted(found.items()):
-        configuration = filename
-        match = re.search(
-            r"(?:\.|__)(R\d.+)\.xsec\.TauREx\.h5$",
-            filename,
-        )
-        if match:
-            configuration = match.group(1)
-
         datasets.append(
             {
                 "key": f"{molecule}/{isotopologue}/{line_list}/{filename}",
@@ -93,9 +142,10 @@ def parse_taurex_files(
                 "isotopologue": isotopologue,
                 "lineList": line_list,
                 "dataset": f"{isotopologue}__{line_list}",
-                "configuration": configuration,
+                "configuration": parse_configuration(filename),
                 "fileName": filename,
                 "url": url,
+                "sourceType": "remote",
                 "label": (
                     f"{isotopologue} / {line_list} / {filename}"
                 ),
@@ -105,8 +155,98 @@ def parse_taurex_files(
     return datasets
 
 
+def build_local_dataset_record(path: Path, root: Path) -> dict | None:
+    filename = path.name
+    if not filename.endswith(TAUREX_SUFFIX):
+        return None
+
+    relative = path.relative_to(root)
+    parts = relative.parts
+    molecule_key = parts[-4] if len(parts) >= 4 else None
+    isotopologue = parts[-3] if len(parts) >= 3 else None
+    line_list = parts[-2] if len(parts) >= 2 else None
+    molecule_label = molecule_key.replace("_p", "+") if molecule_key else None
+
+    try:
+        with h5py.File(path, "r") as handle:
+            molecule_label = read_hdf5_text(handle, "mol_name") or molecule_label
+            key_iso_ll = read_hdf5_text(handle, "key_iso_ll")
+    except OSError:
+        key_iso_ll = None
+
+    if key_iso_ll and "__" in key_iso_ll:
+        isotopologue, line_list = key_iso_ll.split("__", 1)
+
+    if molecule_label:
+        molecule_key = label_to_key(molecule_label)
+
+    if not molecule_key or not isotopologue or not line_list:
+        return None
+
+    return {
+        "key": f"{molecule_key}/{isotopologue}/{line_list}/{filename}",
+        "molecule": molecule_key,
+        "isotopologue": isotopologue,
+        "lineList": line_list,
+        "dataset": f"{isotopologue}__{line_list}",
+        "configuration": parse_configuration(filename),
+        "fileName": filename,
+        "url": None,
+        "sourceType": "local",
+        "localPath": str(path),
+        "label": f"{isotopologue} / {line_list} / {filename}",
+    }
+
+
+@lru_cache(maxsize=4)
+def discover_local_taurex_catalog(root_string: str) -> tuple[dict, ...]:
+    root = Path(root_string)
+    datasets = [
+        record
+        for path in root.rglob(f"*{TAUREX_SUFFIX}")
+        if (record := build_local_dataset_record(path, root)) is not None
+    ]
+    return tuple(
+        sorted(
+            datasets,
+            key=lambda item: (
+                item["molecule"].lower(),
+                item["isotopologue"].lower(),
+                item["lineList"].lower(),
+                item["fileName"].lower(),
+            ),
+        )
+    )
+
+
+def discover_local_opacity_molecules(root: Path) -> list[dict]:
+    molecules: dict[str, str] = {}
+    for dataset in discover_local_taurex_catalog(str(root)):
+        key = dataset["molecule"]
+        molecules[key] = key.replace("_p", "+")
+    return [
+        {"key": key, "label": label}
+        for key, label in sorted(molecules.items(), key=lambda item: item[1].lower())
+    ]
+
+
+def discover_local_taurex_datasets(molecule: str, root: Path) -> list[dict]:
+    if not SAFE_SLUG.fullmatch(molecule):
+        raise ValueError("Invalid molecule identifier.")
+
+    return [
+        dict(dataset)
+        for dataset in discover_local_taurex_catalog(str(root))
+        if dataset["molecule"] == molecule
+    ]
+
+
 @lru_cache(maxsize=1)
 def discover_opacity_molecules() -> list[dict]:
+    local_dir = configured_local_data_dir()
+    if local_dir is not None:
+        return discover_local_opacity_molecules(local_dir)
+
     html_text = fetch_html(f"{EXOMOL_OPACITY_BASE}/")
     molecule_slugs = parse_immediate_children(
         html_text,
@@ -123,6 +263,10 @@ def discover_opacity_molecules() -> list[dict]:
 
 @lru_cache(maxsize=128)
 def discover_taurex_datasets(molecule: str) -> list[dict]:
+    local_dir = configured_local_data_dir()
+    if local_dir is not None:
+        return discover_local_taurex_datasets(molecule, local_dir)
+
     if not SAFE_SLUG.fullmatch(molecule):
         raise ValueError("Invalid molecule identifier.")
 
@@ -163,6 +307,9 @@ def discover_taurex_datasets(molecule: str) -> list[dict]:
 
 
 def download_taurex_file(dataset: dict, cache_dir: Path) -> Path:
+    if dataset.get("sourceType") == "local":
+        return Path(dataset["localPath"])
+
     cache_dir.mkdir(parents=True, exist_ok=True)
     filename = Path(dataset["fileName"]).name
     destination = cache_dir / filename

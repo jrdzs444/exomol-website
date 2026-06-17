@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 try:
     from .opacity import get_opacity_options, get_opacity_spectrum
     from .opacity_catalog import (
+        catalog_source,
         discover_opacity_molecules,
         discover_taurex_datasets,
         download_taurex_file,
@@ -30,6 +31,7 @@ try:
 except ImportError:
     from opacity import get_opacity_options, get_opacity_spectrum
     from opacity_catalog import (
+        catalog_source,
         discover_opacity_molecules,
         discover_taurex_datasets,
         download_taurex_file,
@@ -777,6 +779,7 @@ def root() -> dict:
             "exocrossExe": str(EXOCROSS_EXE) if EXOCROSS_EXE else None,
             "jobBuilderEnabled": JOB_BUILDER_ENABLED,
             "datasetBaseUrl": EXOMOL_DATASET_BASE,
+            "opacityCatalogSource": catalog_source(),
             "taurexOpacityFile": str(TAUREX_H5_FILE),
             "taurexOpacityFileAvailable": TAUREX_H5_FILE.is_file(),
         }
@@ -856,10 +859,10 @@ def resolve_taurex_file(
 
     try:
         return download_taurex_file(dataset, TAUREX_H5_CACHE_DIR), dataset
-    except (OSError, requests.RequestException) as exc:
+    except (OSError, KeyError, requests.RequestException) as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to download the selected TauREx file: {exc}",
+            detail=f"Failed to prepare the selected TauREx file: {exc}",
         ) from exc
 
 
@@ -867,7 +870,7 @@ def resolve_taurex_file(
 def get_taurex_opacity_catalog() -> dict:
     try:
         molecules = discover_opacity_molecules()
-    except requests.RequestException as exc:
+    except (requests.RequestException, ValueError) as exc:
         raise HTTPException(
             status_code=502,
             detail=f"Failed to read the ExoMol opacity catalogue: {exc}",
@@ -885,7 +888,7 @@ def get_taurex_opacity_catalog() -> dict:
 
     return {
         "molecules": molecules,
-        "source": f"{os.environ.get('EXOMOL_OPACITY_BASE', 'https://exomol.com/data/data-types/opacity').rstrip('/')}/",
+        "source": catalog_source(),
     }
 
 
@@ -917,7 +920,8 @@ def get_taurex_opacity_options(
             payload.update(
                 {
                     "datasetKey": dataset["key"],
-                    "sourceUrl": dataset["url"],
+                    "sourceUrl": dataset.get("url"),
+                    "sourceType": dataset.get("sourceType", "remote"),
                     "configuration": dataset["configuration"],
                 }
             )
@@ -947,6 +951,7 @@ def get_taurex_opacity_spectrum(
         )
         if dataset:
             payload["datasetKey"] = dataset["key"]
+            payload["sourceType"] = dataset.get("sourceType", "remote")
         return payload
     except (OSError, ValueError) as exc:
         raise HTTPException(
