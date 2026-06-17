@@ -49,10 +49,11 @@ excluded.
 ## ExoWeb / Podman Deployment
 
 On `exoweb`, the app can be built and run with Podman under the project account.
-For a public `/opacity/` deployment, build the frontend with:
+For the public `https://exomol.com/opacityapp/` deployment, build the frontend
+with relative asset paths:
 
 ```bash
-podman build --build-arg VITE_BASE_PATH=/opacity/ -t exomol-opacity-app-frontend .
+podman build --build-arg VITE_BASE_PATH=./ -t exomol-opacity-app-frontend .
 podman build -t exomol-opacity-app-backend ./backend
 ```
 
@@ -85,9 +86,8 @@ podman run -d \
   exomol-opacity-app-frontend
 ```
 
-The public web server should then proxy the chosen public path, for example
-`https://exomol.com/opacity/`, to the frontend listener on the server. The
-backend port should not be opened publicly.
+The public web server should then proxy `https://exomol.com/opacityapp/` to the
+frontend listener on the server. The backend port should not be opened publicly.
 
 ## Server-Local Opacity Data
 
@@ -152,7 +152,7 @@ Useful server checks:
 
 ```bash
 podman ps
-curl -I http://127.0.0.1:5173/
+curl -I http://127.0.0.1:5173/opacityapp/
 podman exec frontend wget -q -O - http://backend:8000/
 podman logs frontend
 podman logs backend
@@ -170,6 +170,8 @@ podman logs backend
 - `EXOMOL_JOBS_DIR`: generated job directory for disabled legacy workflows.
 - `EXOCROSS_JOB_BUILDER_ENABLED`: defaults to `false`.
 - `EXOCROSS_AUTO_RUN`: defaults to `false` in container deployments.
-- `VITE_BASE_PATH`: frontend build base path, for example `/opacity/`.
+- `VITE_BASE_PATH`: frontend build base path. The container default is `./`,
+  which keeps asset and API URLs relative so the app can run under
+  `/opacityapp/` or another proxied sub-path.
 - `VITE_API_BASE_URL`: optional explicit API prefix. If unset, the frontend
   derives the API prefix from `VITE_BASE_PATH`.

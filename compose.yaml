@@ -19,7 +19,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-./}
     depends_on:
       backend:
         condition: service_healthy
