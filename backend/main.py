@@ -70,6 +70,7 @@ DEFAULT_EXOCROSS_EXE = detect_default_exocross_exe(BASE_DIR)
 EXOCROSS_EXE = Path(os.environ["EXOCROSS_EXE"]) if os.environ.get("EXOCROSS_EXE") else DEFAULT_EXOCROSS_EXE
 EXOCROSS_TIMEOUT_SECONDS = int(os.environ.get("EXOCROSS_TIMEOUT_SECONDS", "180"))
 AUTO_RUN_ON_SUBMIT = env_bool("EXOCROSS_AUTO_RUN", True)
+JOB_BUILDER_ENABLED = env_bool("EXOCROSS_JOB_BUILDER_ENABLED", False)
 DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("EXOMOL_DOWNLOAD_TIMEOUT_SECONDS", "180"))
 TAUREX_H5_FILE = (
     Path(os.environ["TAUREX_H5_FILE"])
@@ -101,6 +102,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def require_job_builder_enabled() -> None:
+    if not JOB_BUILDER_ENABLED:
+        raise HTTPException(
+            status_code=404,
+            detail="ExoCross job preparation is disabled in this deployment.",
+        )
 
 
 class SubmitRequest(BaseModel):
@@ -710,6 +719,9 @@ def save_metadata(job_dir: Path, metadata: dict) -> None:
 
 
 def load_job_metadata(job_id: str) -> tuple[Path, dict]:
+    if not re.fullmatch(r"\d{8}_\d{6}_[0-9a-f]{8}", job_id):
+        raise HTTPException(status_code=404, detail="Job not found.")
+
     job_dir = JOBS_BASE_DIR / job_id
     metadata_path = metadata_path_for(job_dir)
     if not metadata_path.exists():
@@ -763,6 +775,7 @@ def root() -> dict:
             "moleculeCount": len(catalog["molecules"]),
             "masterFile": catalog["masterFile"],
             "exocrossExe": str(EXOCROSS_EXE) if EXOCROSS_EXE else None,
+            "jobBuilderEnabled": JOB_BUILDER_ENABLED,
             "datasetBaseUrl": EXOMOL_DATASET_BASE,
             "taurexOpacityFile": str(TAUREX_H5_FILE),
             "taurexOpacityFileAvailable": TAUREX_H5_FILE.is_file(),
@@ -775,8 +788,9 @@ def root() -> dict:
         }
 
 
-@app.get("/api/options")
+@app.get("/api/options", include_in_schema=JOB_BUILDER_ENABLED)
 def get_options() -> dict:
+    require_job_builder_enabled()
     try:
         return get_catalog_payload()
     except Exception as exc:
@@ -941,8 +955,9 @@ def get_taurex_opacity_spectrum(
         ) from exc
 
 
-@app.post("/api/submit")
+@app.post("/api/submit", include_in_schema=JOB_BUILDER_ENABLED)
 def submit_job(payload: SubmitRequest) -> dict:
+    require_job_builder_enabled()
     if payload.rangeMax <= payload.rangeMin:
         raise HTTPException(status_code=400, detail="rangeMax must be greater than rangeMin.")
 
@@ -1058,14 +1073,16 @@ def submit_job(payload: SubmitRequest) -> dict:
     return build_job_response(metadata)
 
 
-@app.get("/api/jobs/{job_id}")
+@app.get("/api/jobs/{job_id}", include_in_schema=JOB_BUILDER_ENABLED)
 def get_job(job_id: str) -> dict:
+    require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
     return metadata
 
 
-@app.get("/api/jobs/{job_id}/input")
+@app.get("/api/jobs/{job_id}/input", include_in_schema=JOB_BUILDER_ENABLED)
 def download_input_file(job_id: str):
+    require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
     input_path = Path(metadata["inputFile"])
 
@@ -1079,8 +1096,9 @@ def download_input_file(job_id: str):
     )
 
 
-@app.get("/api/jobs/{job_id}/output")
+@app.get("/api/jobs/{job_id}/output", include_in_schema=JOB_BUILDER_ENABLED)
 def download_output_file(job_id: str):
+    require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
     output_file = metadata.get("outputFile")
     if not output_file:
@@ -1097,8 +1115,9 @@ def download_output_file(job_id: str):
     )
 
 
-@app.get("/api/jobs/{job_id}/stdout")
+@app.get("/api/jobs/{job_id}/stdout", include_in_schema=JOB_BUILDER_ENABLED)
 def download_stdout_file(job_id: str):
+    require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
     stdout_file = metadata.get("stdoutFile")
     if not stdout_file:
@@ -1115,8 +1134,9 @@ def download_stdout_file(job_id: str):
     )
 
 
-@app.get("/api/jobs/{job_id}/stderr")
+@app.get("/api/jobs/{job_id}/stderr", include_in_schema=JOB_BUILDER_ENABLED)
 def download_stderr_file(job_id: str):
+    require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
     stderr_file = metadata.get("stderrFile")
     if not stderr_file:
