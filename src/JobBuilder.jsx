@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { API_BASE_URL, getOptions, submitJob } from "./api";
 
+const JOB_BUILDER_DISABLED = true;
+
 function buildDefaultForm(mass = "") {
   return {
     temperature: "296",
@@ -28,6 +30,12 @@ export default function JobBuilder() {
     let active = true;
 
     async function loadOptions() {
+      if (JOB_BUILDER_DISABLED) {
+        setLoadingOptions(false);
+        setErrorMessage("");
+        return;
+      }
+
       try {
         setLoadingOptions(true);
         setErrorMessage("");
@@ -126,6 +134,13 @@ export default function JobBuilder() {
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (JOB_BUILDER_DISABLED) {
+      setErrorMessage(
+        "Public ExoCross/HPC job submission is disabled. This prototype is kept for future work only."
+      );
+      return;
+    }
+
     setSubmitting(true);
     setErrorMessage("");
     setResult(null);
@@ -159,8 +174,9 @@ export default function JobBuilder() {
           <span className="section-kicker">ExoCross workflow</span>
           <h2>Prepare an opacity calculation</h2>
           <p>
-            Select a line list and physical parameters, then generate the
-            ExoCross input and prepare its dataset files.
+            This earlier prototype is kept visible for project continuity, but
+            public ExoCross/HPC submission is disabled until authentication,
+            quota control, and queue integration are agreed.
           </p>
         </div>
         <div className="job-database">
@@ -177,6 +193,14 @@ export default function JobBuilder() {
         </div>
       )}
 
+      <div className="alert alert-warning" role="note">
+        <strong>Future work only.</strong>
+        <span>
+          This tab is a disabled prototype. The production app currently allows
+          read-only visualisation of existing opacity data only.
+        </span>
+      </div>
+
       <div className="job-layout">
         <form className="job-form-card" onSubmit={handleSubmit}>
           <div className="job-card-header">
@@ -190,7 +214,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedMolecule}
                 onChange={(event) => setSelectedMolecule(event.target.value)}
-                disabled={loadingOptions}
+                disabled={JOB_BUILDER_DISABLED || loadingOptions}
               >
                 {catalog.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -205,7 +229,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedIsotopologue}
                 onChange={(event) => setSelectedIsotopologue(event.target.value)}
-                disabled={!isotopologueOptions.length}
+                disabled={JOB_BUILDER_DISABLED || !isotopologueOptions.length}
               >
                 {isotopologueOptions.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -220,7 +244,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedLineList}
                 onChange={(event) => setSelectedLineList(event.target.value)}
-                disabled={!lineListOptions.length}
+                disabled={JOB_BUILDER_DISABLED || !lineListOptions.length}
               >
                 {lineListOptions.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -236,6 +260,7 @@ export default function JobBuilder() {
                 className="field"
                 value={form.profile}
                 onChange={(event) => updateField("profile", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               >
                 <option value="Doppler">Doppler</option>
               </select>
@@ -248,6 +273,7 @@ export default function JobBuilder() {
                 min="1"
                 value={form.temperature}
                 onChange={(event) => updateField("temperature", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               />
             </JobField>
 
@@ -259,6 +285,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.mass}
                 onChange={(event) => updateField("mass", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               />
             </JobField>
 
@@ -270,6 +297,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.rangeMin}
                 onChange={(event) => updateField("rangeMin", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               />
             </JobField>
 
@@ -281,6 +309,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.rangeMax}
                 onChange={(event) => updateField("rangeMax", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               />
             </JobField>
 
@@ -291,6 +320,7 @@ export default function JobBuilder() {
                 min="2"
                 value={form.npoints}
                 onChange={(event) => updateField("npoints", event.target.value)}
+                disabled={JOB_BUILDER_DISABLED}
               />
             </JobField>
           </div>
@@ -308,13 +338,18 @@ export default function JobBuilder() {
               type="submit"
               disabled={
                 submitting ||
+                JOB_BUILDER_DISABLED ||
                 loadingOptions ||
                 !selectedMolecule ||
                 !selectedIsotopologue ||
                 !selectedLineList
               }
             >
-              {submitting ? "Preparing calculation..." : "Prepare ExoCross job"}
+              {JOB_BUILDER_DISABLED
+                ? "Submission disabled"
+                : submitting
+                  ? "Preparing calculation..."
+                  : "Prepare ExoCross job"}
             </button>
             <button
               className="secondary-action"
@@ -324,6 +359,7 @@ export default function JobBuilder() {
                 setResult(null);
                 setErrorMessage("");
               }}
+              disabled={JOB_BUILDER_DISABLED}
             >
               Reset values
             </button>
@@ -338,8 +374,11 @@ export default function JobBuilder() {
 
           <div className={`job-status job-status-${result?.status || "idle"}`}>
             <span>Status</span>
-            <strong>{result?.status || "Ready to prepare"}</strong>
-            <p>{result?.message || "No job has been submitted in this session."}</p>
+            <strong>{result?.status || "Disabled for public deployment"}</strong>
+            <p>
+              {result?.message ||
+                "This workflow is retained as future work and cannot submit jobs in the public app."}
+            </p>
           </div>
 
           <div className="job-result-list">

@@ -165,6 +165,12 @@ code {
   color: #9a3932;
 }
 
+.alert-warning {
+  border: 1px solid #efd49c;
+  background: #fff9ec;
+  color: #735a27;
+}
+
 .dataset-strip {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
