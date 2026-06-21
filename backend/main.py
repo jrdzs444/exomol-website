@@ -937,7 +937,7 @@ def get_taurex_opacity_options(
 def get_taurex_opacity_spectrum(
     temperature: float = Query(gt=0),
     pressure: float = Query(gt=0),
-    max_points: int = Query(5000, alias="maxPoints", ge=100, le=20000),
+    max_points: int = Query(2000, alias="maxPoints", ge=100, le=5000),
     molecule: str | None = Query(None),
     dataset_key: str | None = Query(None, alias="datasetKey"),
 ) -> dict:

@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY EXOMOL.master main.py opacity.py opacity_catalog.py __init__.py ./
+COPY EXOMOL.master opacity-links.txt main.py opacity.py opacity_catalog.py __init__.py ./
 
 RUN mkdir -p /data/jobs /data/opacities \
     && useradd --system --uid 10001 --create-home appuser \

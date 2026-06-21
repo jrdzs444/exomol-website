@@ -15,6 +15,10 @@ EXOMOL_OPACITY_BASE = os.environ.get(
     "EXOMOL_OPACITY_BASE",
     "https://exomol.com/data/data-types/opacity",
 ).rstrip("/")
+EXOMOL_OPACITY_LINK_BASE = os.environ.get(
+    "EXOMOL_OPACITY_LINK_BASE",
+    "https://exomol.com",
+).rstrip("/")
 DOWNLOAD_TIMEOUT_SECONDS = int(
     os.environ.get("EXOMOL_DOWNLOAD_TIMEOUT_SECONDS", "180")
 )
@@ -23,6 +27,12 @@ HTTP_HEADERS = {
 }
 SAFE_SLUG = re.compile(r"^[A-Za-z0-9_+\-]+$")
 TAUREX_SUFFIX = ".xsec.TauREx.h5"
+DEFAULT_OPACITY_LINKS_FILE = Path(__file__).resolve().parent / "opacity-links.txt"
+EXOMOL_OPACITY_LINKS_FILE = (
+    Path(os.environ["EXOMOL_OPACITY_LINKS_FILE"]).expanduser()
+    if os.environ.get("EXOMOL_OPACITY_LINKS_FILE")
+    else DEFAULT_OPACITY_LINKS_FILE if DEFAULT_OPACITY_LINKS_FILE.is_file() else None
+)
 EXOMOL_OPACITY_DATA_DIR = (
     Path(os.environ["EXOMOL_OPACITY_DATA_DIR"]).expanduser()
     if os.environ.get("EXOMOL_OPACITY_DATA_DIR")
@@ -41,8 +51,24 @@ def configured_local_data_dir() -> Path | None:
     return EXOMOL_OPACITY_DATA_DIR
 
 
+def configured_opacity_links_file() -> Path | None:
+    if EXOMOL_OPACITY_LINKS_FILE is None:
+        return None
+    if not EXOMOL_OPACITY_LINKS_FILE.is_file():
+        raise ValueError(
+            "EXOMOL_OPACITY_LINKS_FILE does not exist or is not a file: "
+            f"{EXOMOL_OPACITY_LINKS_FILE}"
+        )
+    return EXOMOL_OPACITY_LINKS_FILE
+
+
 def catalog_source() -> str:
+    links_file = configured_opacity_links_file()
     local_dir = configured_local_data_dir()
+    if links_file is not None:
+        if local_dir is not None:
+            return f"{links_file} mapped to {local_dir}"
+        return str(links_file)
     if local_dir is not None:
         return str(local_dir)
     return f"{EXOMOL_OPACITY_BASE}/"
@@ -73,6 +99,75 @@ def read_hdf5_text(handle: h5py.File, name: str) -> str | None:
 def parse_configuration(filename: str) -> str:
     match = re.search(r"(?:\.|__)(R\d.+)\.xsec\.TauREx\.h5$", filename)
     return match.group(1) if match else filename
+
+
+def normalize_link_path(raw_link: str) -> str | None:
+    link = raw_link.strip().split()[0] if raw_link.strip() else ""
+    if not link or link.startswith("#"):
+        return None
+
+    path = unquote(urlparse(link).path or link)
+    return path if path.endswith(TAUREX_SUFFIX) else None
+
+
+def opacity_link_segments(link_path: str) -> list[str]:
+    parts = [part for part in link_path.strip("/").split("/") if part]
+    if parts and parts[0] == "db":
+        parts = parts[1:]
+    return parts
+
+
+def build_link_file_dataset_record(
+    raw_link: str,
+    local_root: Path | None = None,
+) -> dict | None:
+    link_path = normalize_link_path(raw_link)
+    if link_path is None:
+        return None
+
+    parts = opacity_link_segments(link_path)
+    if len(parts) < 4:
+        return None
+
+    molecule, isotopologue, line_list, filename = parts[-4:]
+    if not (
+        SAFE_SLUG.fullmatch(molecule)
+        and SAFE_SLUG.fullmatch(isotopologue)
+        and SAFE_SLUG.fullmatch(line_list)
+        and filename.endswith(TAUREX_SUFFIX)
+    ):
+        return None
+
+    parsed = urlparse(raw_link.strip())
+    url = (
+        raw_link.strip()
+        if parsed.scheme in {"http", "https"} and parsed.netloc
+        else urljoin(EXOMOL_OPACITY_LINK_BASE + "/", link_path.lstrip("/"))
+    )
+
+    local_path = local_root.joinpath(*parts) if local_root is not None else None
+    source_type = "local" if local_path is not None and local_path.is_file() else "remote"
+
+    record = {
+        "key": f"{molecule}/{isotopologue}/{line_list}/{filename}",
+        "molecule": molecule,
+        "isotopologue": isotopologue,
+        "lineList": line_list,
+        "dataset": f"{isotopologue}__{line_list}",
+        "configuration": parse_configuration(filename),
+        "fileName": filename,
+        "url": url,
+        "sourceType": source_type,
+        "catalogPath": "/" + "/".join(["db", *parts]),
+        "label": f"{isotopologue} / {line_list} / {filename}",
+    }
+
+    if source_type == "local":
+        record["localPath"] = str(local_path)
+    elif local_path is not None:
+        record["expectedLocalPath"] = str(local_path)
+
+    return record
 
 
 def fetch_html(url: str) -> str:
@@ -241,9 +336,74 @@ def discover_local_taurex_datasets(molecule: str, root: Path) -> list[dict]:
     ]
 
 
+@lru_cache(maxsize=4)
+def discover_link_file_taurex_catalog(
+    links_file_string: str,
+    local_root_string: str = "",
+) -> tuple[dict, ...]:
+    links_file = Path(links_file_string)
+    local_root = Path(local_root_string) if local_root_string else None
+    datasets: dict[str, dict] = {}
+
+    for line in links_file.read_text(encoding="utf-8").splitlines():
+        record = build_link_file_dataset_record(line, local_root)
+        if record is not None:
+            datasets[record["key"]] = record
+
+    return tuple(
+        sorted(
+            datasets.values(),
+            key=lambda item: (
+                item["molecule"].lower(),
+                item["isotopologue"].lower(),
+                item["lineList"].lower(),
+                item["fileName"].lower(),
+            ),
+        )
+    )
+
+
+def discover_link_file_opacity_molecules(
+    links_file: Path,
+    local_root: Path | None = None,
+) -> list[dict]:
+    molecules: dict[str, str] = {}
+    for dataset in discover_link_file_taurex_catalog(
+        str(links_file),
+        str(local_root) if local_root is not None else "",
+    ):
+        key = dataset["molecule"]
+        molecules[key] = key.replace("_p", "+")
+    return [
+        {"key": key, "label": label}
+        for key, label in sorted(molecules.items(), key=lambda item: item[1].lower())
+    ]
+
+
+def discover_link_file_taurex_datasets(
+    molecule: str,
+    links_file: Path,
+    local_root: Path | None = None,
+) -> list[dict]:
+    if not SAFE_SLUG.fullmatch(molecule):
+        raise ValueError("Invalid molecule identifier.")
+
+    return [
+        dict(dataset)
+        for dataset in discover_link_file_taurex_catalog(
+            str(links_file),
+            str(local_root) if local_root is not None else "",
+        )
+        if dataset["molecule"] == molecule
+    ]
+
+
 @lru_cache(maxsize=1)
 def discover_opacity_molecules() -> list[dict]:
+    links_file = configured_opacity_links_file()
     local_dir = configured_local_data_dir()
+    if links_file is not None:
+        return discover_link_file_opacity_molecules(links_file, local_dir)
     if local_dir is not None:
         return discover_local_opacity_molecules(local_dir)
 
@@ -263,7 +423,10 @@ def discover_opacity_molecules() -> list[dict]:
 
 @lru_cache(maxsize=128)
 def discover_taurex_datasets(molecule: str) -> list[dict]:
+    links_file = configured_opacity_links_file()
     local_dir = configured_local_data_dir()
+    if links_file is not None:
+        return discover_link_file_taurex_datasets(molecule, links_file, local_dir)
     if local_dir is not None:
         return discover_local_taurex_datasets(molecule, local_dir)
 

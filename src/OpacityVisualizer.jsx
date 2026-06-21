@@ -36,11 +36,12 @@ export default function OpacityVisualizer() {
   const [molecules, setMolecules] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [selectedMolecule, setSelectedMolecule] = useState("");
+  const [selectedIsotopologue, setSelectedIsotopologue] = useState("");
   const [selectedDataset, setSelectedDataset] = useState("");
   const [options, setOptions] = useState(null);
   const [selectedTemperature, setSelectedTemperature] = useState("");
   const [selectedPressure, setSelectedPressure] = useState("");
-  const [maxPoints, setMaxPoints] = useState("5000");
+  const [maxPoints, setMaxPoints] = useState("2000");
   const [spectrum, setSpectrum] = useState(null);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const [loadingDatasets, setLoadingDatasets] = useState(false);
@@ -88,6 +89,7 @@ export default function OpacityVisualizer() {
         setLoadingDatasets(true);
         setErrorMessage("");
         setDatasets([]);
+        setSelectedIsotopologue("");
         setSelectedDataset("");
         setOptions(null);
         setSpectrum(null);
@@ -102,6 +104,7 @@ export default function OpacityVisualizer() {
           availableDatasets.find((item) => item.lineList === "Rivlin") ||
           availableDatasets[0];
         setDatasets(availableDatasets);
+        setSelectedIsotopologue(preferred?.isotopologue || "");
         setSelectedDataset(preferred?.key || "");
         if (!preferred) {
           setErrorMessage(
@@ -122,6 +125,12 @@ export default function OpacityVisualizer() {
       active = false;
     };
   }, [selectedMolecule]);
+
+  function handleIsotopologueChange(value) {
+    const nextDataset = datasets.find((item) => item.isotopologue === value);
+    setSelectedIsotopologue(value);
+    setSelectedDataset(nextDataset?.key || "");
+  }
 
   useEffect(() => {
     if (!selectedMolecule || !selectedDataset) return undefined;
@@ -216,6 +225,27 @@ export default function OpacityVisualizer() {
     [datasets, selectedDataset]
   );
 
+  const isotopologues = useMemo(() => {
+    const labels = new Map();
+    datasets.forEach((item) => {
+      if (item.isotopologue) {
+        labels.set(item.isotopologue, item.isotopologue);
+      }
+    });
+    return Array.from(labels, ([key, label]) => ({ key, label })).sort((a, b) =>
+      a.label.localeCompare(b.label)
+    );
+  }, [datasets]);
+
+  const visibleDatasets = useMemo(
+    () =>
+      datasets.filter(
+        (item) =>
+          !selectedIsotopologue || item.isotopologue === selectedIsotopologue
+      ),
+    [datasets, selectedIsotopologue]
+  );
+
   const plotSeries = useMemo(() => {
     if (!spectrum) return { x: [], y: [] };
 
@@ -276,17 +306,32 @@ export default function OpacityVisualizer() {
           </select>
         </MetricSelect>
 
+        <MetricSelect label="Isotopologue">
+          <select
+            className="metric-field"
+            value={selectedIsotopologue}
+            onChange={(event) => handleIsotopologueChange(event.target.value)}
+            disabled={loadingDatasets || !isotopologues.length}
+          >
+            {isotopologues.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </MetricSelect>
+
         <MetricSelect label="Dataset">
           <select
             className="metric-field"
             value={selectedDataset}
             onChange={(event) => setSelectedDataset(event.target.value)}
-            disabled={loadingDatasets || !datasets.length}
+            disabled={loadingDatasets || !visibleDatasets.length}
             title={selectedDatasetEntry?.label || ""}
           >
-            {datasets.map((item) => (
+            {visibleDatasets.map((item) => (
               <option key={item.key} value={item.key}>
-                {item.label}
+                {item.lineList} ({item.configuration})
               </option>
             ))}
           </select>
@@ -347,10 +392,8 @@ export default function OpacityVisualizer() {
                 disabled={loadingOptions || !options}
               >
                 <option value="1000">Fast - 1,000 points</option>
-                <option value="2500">Balanced - 2,500 points</option>
-                <option value="5000">Detailed - 5,000 points</option>
-                <option value="10000">High detail - 10,000 points</option>
-                <option value="20000">Maximum - 20,000 points</option>
+                <option value="1500">Balanced - 1,500 points</option>
+                <option value="2000">Desktop max - 2,000 points</option>
               </select>
             </Field>
           </div>
@@ -359,6 +402,10 @@ export default function OpacityVisualizer() {
             <SummaryRow
               label="Molecule"
               value={options?.molecule || selectedMolecule || "-"}
+            />
+            <SummaryRow
+              label="Isotopologue"
+              value={selectedDatasetEntry?.isotopologue || selectedIsotopologue || "-"}
             />
             <SummaryRow
               label="Dataset"

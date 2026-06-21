@@ -8,6 +8,9 @@ import h5py
 import numpy as np
 
 from backend.opacity_catalog import (
+    build_link_file_dataset_record,
+    discover_link_file_opacity_molecules,
+    discover_link_file_taurex_datasets,
     discover_local_opacity_molecules,
     discover_local_taurex_datasets,
     parse_immediate_children,
@@ -87,6 +90,70 @@ class OpacityCatalogTests(unittest.TestCase):
             self.assertEqual(len(datasets), 1)
             self.assertEqual(datasets[0]["sourceType"], "local")
             self.assertEqual(datasets[0]["localPath"], str(path))
+
+    def test_link_file_parser_filters_taurex_cross_sections(self) -> None:
+        record = build_link_file_dataset_record(
+            "/db/H2O/1H2-16O/POKAZATEL/"
+            "1H2-16O__POKAZATEL.R15000_0.3-50mu.xsec.TauREx.h5"
+        )
+        ignored = build_link_file_dataset_record(
+            "/db/H2O/1H2-16O/POKAZATEL/"
+            "1H2-16O__POKAZATEL.R1000_0.3-50mu.ktable.NEMESIS.kta"
+        )
+
+        self.assertIsNone(ignored)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["molecule"], "H2O")
+        self.assertEqual(record["isotopologue"], "1H2-16O")
+        self.assertEqual(record["lineList"], "POKAZATEL")
+        self.assertEqual(record["configuration"], "R15000_0.3-50mu")
+        self.assertEqual(record["sourceType"], "remote")
+        self.assertEqual(
+            record["url"],
+            (
+                "https://exomol.com/db/H2O/1H2-16O/POKAZATEL/"
+                "1H2-16O__POKAZATEL.R15000_0.3-50mu.xsec.TauREx.h5"
+            ),
+        )
+
+    def test_link_file_catalog_can_map_to_local_data_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            links_file = root / "opacity-links.txt"
+            local_data = root / "exomol3_data"
+            local_h5 = (
+                local_data
+                / "HCN"
+                / "1H-12C-14N"
+                / "Harris"
+                / "1H-12C-14N__Harris.R15000_0.3-50mu.xsec.TauREx.h5"
+            )
+            local_h5.parent.mkdir(parents=True)
+            local_h5.write_bytes(b"placeholder")
+
+            links_file.write_text(
+                "\n".join(
+                    [
+                        "/db/HCN/1H-12C-14N/Harris/"
+                        "1H-12C-14N__Harris.R1000_0.3-50mu.ktable.ARCiS.fits.gz",
+                        "/db/HCN/1H-12C-14N/Harris/"
+                        "1H-12C-14N__Harris.R15000_0.3-50mu.xsec.TauREx.h5",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            molecules = discover_link_file_opacity_molecules(links_file, local_data)
+            datasets = discover_link_file_taurex_datasets(
+                "HCN",
+                links_file,
+                local_data,
+            )
+
+            self.assertEqual(molecules, [{"key": "HCN", "label": "HCN"}])
+            self.assertEqual(len(datasets), 1)
+            self.assertEqual(datasets[0]["sourceType"], "local")
+            self.assertEqual(datasets[0]["localPath"], str(local_h5))
 
 
 if __name__ == "__main__":

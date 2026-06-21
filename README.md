@@ -3,11 +3,12 @@
 A containerized web application for discovering and visualizing existing
 ExoMolOP TauREx cross-section data.
 
-The production scope is intentionally narrow: users select a published opacity
-dataset, temperature, pressure, and browser display resolution, then inspect the
-pre-calculated cross-section spectrum. ExoCross/HPC job submission is disabled
-by default and should remain future work until authentication, quota control,
-queue integration, and server policy are agreed.
+The production scope is intentionally narrow: users select a molecule,
+isotopologue, published opacity dataset, temperature, pressure, and browser
+display resolution, then inspect the pre-calculated cross-section spectrum.
+ExoCross/HPC job submission is disabled by default and should remain future work
+until authentication, quota control, queue integration, and server policy are
+agreed.
 
 ## Quick Start
 
@@ -32,11 +33,17 @@ container proxies `/api` requests to the backend container.
 
 - Reads the ExoMolOP opacity catalogue dynamically rather than hard-coding
   molecule and dataset options.
+- Ships with Christian Hill's `backend/opacity-links.txt` catalogue, filtering it
+  to currently supported `.xsec.TauREx.h5` files.
 - Can use a server-local HDF5 data directory when `EXOMOL_OPACITY_DATA_DIR` is
   configured.
-- Falls back to the live ExoMolOP catalogue and caches downloaded TauREx HDF5
-  files when no local data directory is configured.
-- Lists published `.xsec.TauREx.h5` datasets for each molecule.
+- Maps catalogue `/db/...` entries to server-local files when the ExoMol data
+  directory is mounted; otherwise it falls back to downloading the selected
+  TauREx HDF5 file.
+- Falls back to the live ExoMolOP web catalogue only when no local/link-file
+  catalogue is available.
+- Lists published `.xsec.TauREx.h5` datasets by molecule, isotopologue, and
+  dataset.
 - Reads temperature and pressure grids from the selected HDF5 file.
 - Returns one pressure-temperature cross-section slice from FastAPI.
 - Down-samples large spectra to a browser-friendly display resolution.
@@ -67,10 +74,12 @@ podman run -d \
   --name backend \
   --network exomol-net \
   --network-alias backend \
+  -e EXOMOL_OPACITY_DATA_DIR=/data/exomol3_data \
   -e EXOMOL_JOBS_DIR=/data/jobs \
   -e TAUREX_H5_CACHE_DIR=/data/opacities \
   -e EXOCROSS_JOB_BUILDER_ENABLED=false \
   -e EXOCROSS_AUTO_RUN=false \
+  -v /mnt/data/exomol/exomol3_data:/data/exomol3_data:ro,Z \
   -v /mnt/data/rundongji/jobs:/data/jobs:Z \
   -v /mnt/data/rundongji/opacities:/data/opacities:Z \
   exomol-opacity-app-backend
@@ -91,8 +100,28 @@ frontend listener on the server. The backend port should not be opened publicly.
 
 ## Server-Local Opacity Data
 
-If ExoMol provides a read-only directory containing published TauREx HDF5 files,
-mount it into the backend container and set `EXOMOL_OPACITY_DATA_DIR`.
+Christian Hill confirmed that the ExoMol opacity data are stored on `exoweb` at:
+
+```text
+/mnt/data/exomol/exomol3_data/
+```
+
+The directory structure is:
+
+```text
+<molecule>/<isotopologue>/<dataset>/
+```
+
+For example:
+
+```text
+BeH/9Be-1H/Darby-Lewis/
+```
+
+Mount this directory read-only into the backend container and set
+`EXOMOL_OPACITY_DATA_DIR`. The bundled `backend/opacity-links.txt` catalogue
+uses `/db/...` paths and the backend maps those paths onto this mounted data
+directory when matching files exist.
 
 Example:
 
@@ -101,20 +130,21 @@ podman run -d \
   --name backend \
   --network exomol-net \
   --network-alias backend \
-  -e EXOMOL_OPACITY_DATA_DIR=/data/exomol-opacities \
+  -e EXOMOL_OPACITY_DATA_DIR=/data/exomol3_data \
   -e EXOMOL_JOBS_DIR=/data/jobs \
   -e TAUREX_H5_CACHE_DIR=/data/opacities \
   -e EXOCROSS_JOB_BUILDER_ENABLED=false \
-  -v /path/on/server/opacities:/data/exomol-opacities:ro,Z \
+  -v /mnt/data/exomol/exomol3_data:/data/exomol3_data:ro,Z \
   -v /mnt/data/rundongji/jobs:/data/jobs:Z \
   -v /mnt/data/rundongji/opacities:/data/opacities:Z \
   exomol-opacity-app-backend
 ```
 
-When `EXOMOL_OPACITY_DATA_DIR` is set, the catalogue is generated from local
-`.xsec.TauREx.h5` files and selected spectra are read directly from disk. When
-it is not set, the app uses the live ExoMolOP web catalogue and downloads
-selected HDF5 files into the cache directory.
+When `EXOMOL_OPACITY_DATA_DIR` is set, selected spectra are read directly from
+disk whenever the bundled catalogue entry maps to an existing local file. When
+it is not set, the app uses the same catalogue to download selected HDF5 files
+into the cache directory. You can replace or refresh the catalogue by mounting a
+new file and setting `EXOMOL_OPACITY_LINKS_FILE`.
 
 ## Development Without Docker
 
@@ -162,8 +192,12 @@ podman logs backend
 
 - `EXOMOL_OPACITY_DATA_DIR`: optional read-only directory containing local
   `.xsec.TauREx.h5` files.
+- `EXOMOL_OPACITY_LINKS_FILE`: optional opacity link catalogue. If unset, the
+  backend uses the bundled `backend/opacity-links.txt` file when present.
+- `EXOMOL_OPACITY_LINK_BASE`: base URL for relative catalogue paths, defaulting
+  to `https://exomol.com`.
 - `EXOMOL_OPACITY_BASE`: ExoMolOP web catalogue URL used when no local data
-  directory is configured.
+  directory or link-file catalogue is configured.
 - `EXOMOL_DOWNLOAD_TIMEOUT_SECONDS`: remote download timeout.
 - `TAUREX_H5_FILE`: optional single local TauREx HDF5 file.
 - `TAUREX_H5_CACHE_DIR`: downloaded HDF5 cache directory.
@@ -175,3 +209,16 @@ podman logs backend
   `/opacityapp/` or another proxied sub-path.
 - `VITE_API_BASE_URL`: optional explicit API prefix. If unset, the frontend
   derives the API prefix from `VITE_BASE_PATH`.
+
+## Scope Notes From Christian Hill
+
+- The first production version should remain a read-only visualizer for existing
+  pre-calculated opacity data.
+- Anonymous read-only access is reasonable, subject to agreement from Janahan
+  and Sergey.
+- New ExoCross/HPC calculation submission requires a separate database,
+  metadata, quota, authentication, and queue-management decision and remains
+  future work.
+- Browser display should be down-sampled for desktop users. The UI therefore
+  defaults to 2,000 displayed points and no longer offers very large display
+  resolutions.
