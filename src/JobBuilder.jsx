@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { API_BASE_URL, getOptions, submitJob } from "./api";
+import createPlotlyComponentModule from "react-plotly.js/factory";
+import Plotly from "plotly.js-basic-dist-min";
+import {
+  API_BASE_URL,
+  getJob,
+  getJobSpectrum,
+  getOptions,
+  getRuntime,
+  submitJob,
+} from "./api";
 
-const JOB_BUILDER_DISABLED = true;
+const POLLABLE_STATUSES = new Set(["queued", "running", "waiting_for_exocross"]);
+const createPlotlyComponent =
+  createPlotlyComponentModule.default || createPlotlyComponentModule;
+const Plot = createPlotlyComponent(Plotly);
 
 function buildDefaultForm(mass = "") {
   return {
@@ -21,16 +33,46 @@ export default function JobBuilder() {
   const [selectedIsotopologue, setSelectedIsotopologue] = useState("");
   const [selectedLineList, setSelectedLineList] = useState("");
   const [form, setForm] = useState(buildDefaultForm());
+  const [runtime, setRuntime] = useState(null);
+  const [loadingRuntime, setLoadingRuntime] = useState(true);
   const [loadingOptions, setLoadingOptions] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState(null);
+  const [outputSpectrum, setOutputSpectrum] = useState(null);
+  const [loadingOutputSpectrum, setLoadingOutputSpectrum] = useState(false);
+
+  const jobBuilderEnabled = Boolean(runtime?.jobBuilderEnabled);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadRuntime() {
+      try {
+        setLoadingRuntime(true);
+        const data = await getRuntime();
+        if (active) setRuntime(data);
+      } catch (error) {
+        if (active) {
+          setRuntime({ jobBuilderEnabled: false });
+          setErrorMessage(error.message || "Failed to load runtime configuration.");
+        }
+      } finally {
+        if (active) setLoadingRuntime(false);
+      }
+    }
+
+    loadRuntime();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     async function loadOptions() {
-      if (JOB_BUILDER_DISABLED) {
+      if (!jobBuilderEnabled) {
         setLoadingOptions(false);
         setErrorMessage("");
         return;
@@ -66,7 +108,54 @@ export default function JobBuilder() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [jobBuilderEnabled]);
+
+  useEffect(() => {
+    if (!result?.jobId || !POLLABLE_STATUSES.has(result.status)) return undefined;
+
+    let active = true;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getJob(result.jobId);
+        if (active) setResult(next);
+      } catch (error) {
+        if (active) {
+          setErrorMessage(error.message || "Failed to refresh job status.");
+        }
+      }
+    }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [result?.jobId, result?.status]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadOutputSpectrum() {
+      if (!result?.jobId || !result.outputSpectrumUrl) {
+        setOutputSpectrum(null);
+        return;
+      }
+
+      try {
+        setLoadingOutputSpectrum(true);
+        const data = await getJobSpectrum(result.jobId, 2000);
+        if (active) setOutputSpectrum(data);
+      } catch {
+        if (active) setOutputSpectrum(null);
+      } finally {
+        if (active) setLoadingOutputSpectrum(false);
+      }
+    }
+
+    loadOutputSpectrum();
+    return () => {
+      active = false;
+    };
+  }, [result?.jobId, result?.outputSpectrumUrl]);
 
   const moleculeEntry = useMemo(
     () => catalog.find((item) => item.key === selectedMolecule) || null,
@@ -134,9 +223,10 @@ export default function JobBuilder() {
 
   async function handleSubmit(event) {
     event.preventDefault();
-    if (JOB_BUILDER_DISABLED) {
+    if (!jobBuilderEnabled) {
       setErrorMessage(
-        "Public ExoCross/HPC job submission is disabled. This prototype is kept for future work only."
+        runtime?.disabledReason ||
+          "ExoCross/HPC job submission is not enabled on this server."
       );
       return;
     }
@@ -144,6 +234,7 @@ export default function JobBuilder() {
     setSubmitting(true);
     setErrorMessage("");
     setResult(null);
+    setOutputSpectrum(null);
 
     try {
       const response = await submitJob({
@@ -174,14 +265,16 @@ export default function JobBuilder() {
           <span className="section-kicker">ExoCross workflow</span>
           <h2>Prepare an opacity calculation</h2>
           <p>
-            This earlier prototype is kept visible for project continuity, but
-            public ExoCross/HPC submission is disabled until authentication,
-            quota control, and queue integration are agreed.
+            Select a molecule, isotopologue, line list, and calculation range.
+            When the server has a configured ExoCross runner, this form prepares
+            the input files and submits the calculation.
           </p>
         </div>
         <div className="job-database">
           <span>EXOMOL.master</span>
-          <strong>{databaseVersion || (loadingOptions ? "Loading" : "-")}</strong>
+          <strong>
+            {databaseVersion || (loadingRuntime || loadingOptions ? "Loading" : "-")}
+          </strong>
           <small>{catalog.length} molecules</small>
         </div>
       </div>
@@ -193,13 +286,25 @@ export default function JobBuilder() {
         </div>
       )}
 
-      <div className="alert alert-warning" role="note">
-        <strong>Future work only.</strong>
-        <span>
-          This tab is a disabled prototype. The production app currently allows
-          read-only visualisation of existing opacity data only.
-        </span>
-      </div>
+      {!jobBuilderEnabled && (
+        <div className="alert alert-warning" role="note">
+          <strong>Task 2 is not active on this server.</strong>
+          <span>
+            {runtime?.disabledReason ||
+              "The UI is ready, but a real ExoCross executable or HPC submission script has not been configured."}
+          </span>
+        </div>
+      )}
+
+      {jobBuilderEnabled && !runtime?.canRunExocross && (
+        <div className="alert alert-warning" role="note">
+          <strong>Prepare-only mode.</strong>
+          <span>
+            Jobs can create input and resolve dataset files, but this deployment
+            is not configured to run ExoCross automatically.
+          </span>
+        </div>
+      )}
 
       <div className="job-layout">
         <form className="job-form-card" onSubmit={handleSubmit}>
@@ -214,7 +319,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedMolecule}
                 onChange={(event) => setSelectedMolecule(event.target.value)}
-                disabled={JOB_BUILDER_DISABLED || loadingOptions}
+                disabled={!jobBuilderEnabled || loadingOptions}
               >
                 {catalog.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -229,7 +334,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedIsotopologue}
                 onChange={(event) => setSelectedIsotopologue(event.target.value)}
-                disabled={JOB_BUILDER_DISABLED || !isotopologueOptions.length}
+                disabled={!jobBuilderEnabled || !isotopologueOptions.length}
               >
                 {isotopologueOptions.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -244,7 +349,7 @@ export default function JobBuilder() {
                 className="field"
                 value={selectedLineList}
                 onChange={(event) => setSelectedLineList(event.target.value)}
-                disabled={JOB_BUILDER_DISABLED || !lineListOptions.length}
+                disabled={!jobBuilderEnabled || !lineListOptions.length}
               >
                 {lineListOptions.map((item) => (
                   <option key={item.key} value={item.key}>
@@ -260,7 +365,7 @@ export default function JobBuilder() {
                 className="field"
                 value={form.profile}
                 onChange={(event) => updateField("profile", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               >
                 <option value="Doppler">Doppler</option>
               </select>
@@ -273,7 +378,7 @@ export default function JobBuilder() {
                 min="1"
                 value={form.temperature}
                 onChange={(event) => updateField("temperature", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               />
             </JobField>
 
@@ -285,7 +390,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.mass}
                 onChange={(event) => updateField("mass", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               />
             </JobField>
 
@@ -297,7 +402,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.rangeMin}
                 onChange={(event) => updateField("rangeMin", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               />
             </JobField>
 
@@ -309,7 +414,7 @@ export default function JobBuilder() {
                 step="any"
                 value={form.rangeMax}
                 onChange={(event) => updateField("rangeMax", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               />
             </JobField>
 
@@ -320,7 +425,7 @@ export default function JobBuilder() {
                 min="2"
                 value={form.npoints}
                 onChange={(event) => updateField("npoints", event.target.value)}
-                disabled={JOB_BUILDER_DISABLED}
+                disabled={!jobBuilderEnabled}
               />
             </JobField>
           </div>
@@ -338,18 +443,20 @@ export default function JobBuilder() {
               type="submit"
               disabled={
                 submitting ||
-                JOB_BUILDER_DISABLED ||
+                !jobBuilderEnabled ||
                 loadingOptions ||
                 !selectedMolecule ||
                 !selectedIsotopologue ||
                 !selectedLineList
               }
             >
-              {JOB_BUILDER_DISABLED
-                ? "Submission disabled"
+              {!jobBuilderEnabled
+                ? "Submission not configured"
                 : submitting
                   ? "Preparing calculation..."
-                  : "Prepare ExoCross job"}
+                  : runtime?.canRunExocross
+                    ? "Submit ExoCross job"
+                    : "Prepare ExoCross input"}
             </button>
             <button
               className="secondary-action"
@@ -357,9 +464,10 @@ export default function JobBuilder() {
               onClick={() => {
                 setForm(buildDefaultForm(lineListEntry?.massDa || ""));
                 setResult(null);
+                setOutputSpectrum(null);
                 setErrorMessage("");
               }}
-              disabled={JOB_BUILDER_DISABLED}
+              disabled={!jobBuilderEnabled}
             >
               Reset values
             </button>
@@ -374,10 +482,16 @@ export default function JobBuilder() {
 
           <div className={`job-status job-status-${result?.status || "idle"}`}>
             <span>Status</span>
-            <strong>{result?.status || "Disabled for public deployment"}</strong>
+            <strong>
+              {result?.status ||
+                (jobBuilderEnabled ? "Ready" : "Not configured")}
+            </strong>
             <p>
               {result?.message ||
-                "This workflow is retained as future work and cannot submit jobs in the public app."}
+                (jobBuilderEnabled
+                  ? "Submit a calculation to create job files and, when configured, run ExoCross."
+                  : runtime?.disabledReason ||
+                    "A real ExoCross runner or HPC submission script is required before this can run.")}
             </p>
           </div>
 
@@ -420,6 +534,26 @@ export default function JobBuilder() {
                 Download output
               </button>
             )}
+            {result?.stdoutDownloadUrl && (
+              <a
+                className="secondary-action"
+                href={`${API_BASE_URL}${result.stdoutDownloadUrl}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Download stdout
+              </a>
+            )}
+            {result?.stderrDownloadUrl && (
+              <a
+                className="secondary-action"
+                href={`${API_BASE_URL}${result.stderrDownloadUrl}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Download stderr
+              </a>
+            )}
           </div>
 
           <div className="job-preview">
@@ -429,6 +563,46 @@ export default function JobBuilder() {
                 "The generated ExoCross input file will be shown here."}
             </pre>
           </div>
+
+          {(loadingOutputSpectrum || outputSpectrum) && (
+            <div className="job-output-plot">
+              <span>Output spectrum</span>
+              {loadingOutputSpectrum && !outputSpectrum ? (
+                <p>Reading output spectrum...</p>
+              ) : (
+                <Plot
+                  data={[
+                    {
+                      x: outputSpectrum.wavenumber,
+                      y: outputSpectrum.crossSection,
+                      type: "scatter",
+                      mode: "lines",
+                      line: { color: "#0f6f8f", width: 1.4 },
+                    },
+                  ]}
+                  layout={{
+                    autosize: true,
+                    margin: { l: 64, r: 20, t: 24, b: 56 },
+                    paper_bgcolor: "rgba(0,0,0,0)",
+                    plot_bgcolor: "rgba(248,251,252,0.72)",
+                    xaxis: {
+                      title: { text: "Wavenumber (cm^-1)" },
+                      zeroline: false,
+                    },
+                    yaxis: {
+                      title: { text: "Cross-section" },
+                      type: "log",
+                      zeroline: false,
+                    },
+                    showlegend: false,
+                  }}
+                  config={{ responsive: true, displaylogo: false }}
+                  useResizeHandler
+                  className="plotly-chart"
+                />
+              )}
+            </div>
+          )}
 
           {result?.missingFiles?.length > 0 && (
             <div className="job-warning">

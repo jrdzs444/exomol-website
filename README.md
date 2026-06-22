@@ -204,11 +204,54 @@ podman logs backend
 - `EXOMOL_JOBS_DIR`: generated job directory for disabled legacy workflows.
 - `EXOCROSS_JOB_BUILDER_ENABLED`: defaults to `false`.
 - `EXOCROSS_AUTO_RUN`: defaults to `false` in container deployments.
+- `EXOCROSS_EXE`: optional path to a Linux-compatible ExoCross executable.
+- `EXOMOL_LINE_LIST_DATA_DIR`: optional read-only ExoMol line-list data
+  directory. If unset, the backend reuses `EXOMOL_OPACITY_DATA_DIR` when
+  available.
+- `EXOCROSS_MAX_NPOINTS`: maximum points allowed for a generated calculation.
+- `EXOCROSS_MAX_RANGE_WIDTH`: maximum submitted spectral range width in cm-1.
+- `EXOCROSS_MAX_TRANSITION_FILES`: maximum number of transition chunks a job may
+  prepare.
 - `VITE_BASE_PATH`: frontend build base path. The container default is `./`,
   which keeps asset and API URLs relative so the app can run under
   `/opacityapp/` or another proxied sub-path.
 - `VITE_API_BASE_URL`: optional explicit API prefix. If unset, the frontend
   derives the API prefix from `VITE_BASE_PATH`.
+
+## Task 2 / ExoCross Job Builder
+
+The Job Builder tab is no longer hard-coded off in the frontend. It reads
+`/api/runtime` and enables the form only when the backend deployment is
+configured for it.
+
+For a controlled private deployment that prepares job inputs without running
+ExoCross automatically:
+
+```bash
+-e EXOCROSS_JOB_BUILDER_ENABLED=true \
+-e EXOCROSS_AUTO_RUN=false \
+-e EXOMOL_LINE_LIST_DATA_DIR=/data/exomol3_data
+```
+
+For a deployment that actually runs ExoCross, the backend also needs a real
+Linux-compatible executable:
+
+```bash
+-e EXOCROSS_JOB_BUILDER_ENABLED=true \
+-e EXOCROSS_AUTO_RUN=true \
+-e EXOCROSS_EXE=/path/to/exocross
+```
+
+The current `exoweb` account has the ExoMol data directory and job storage, but
+no `exocross`, `sbatch`, `squeue`, or `qsub` command is available in `PATH`.
+Therefore the public production deployment should keep Task 2 disabled until
+Christian/Edd provide the approved ExoCross executable or HPC submission script.
+
+When enabled, the backend validates molecule/isotopologue/line-list choices
+against `EXOMOL.master`, applies range and size limits, writes a per-job working
+directory, resolves `.states`, `.trans`, and `.pf` files from the local ExoMol
+data directory when possible, and exposes job status, input download, output
+download, stdout/stderr logs, and a best-effort two-column output spectrum API.
 
 ## Scope Notes From Christian Hill
 

@@ -714,6 +714,29 @@ code {
   white-space: pre-wrap;
 }
 
+.job-output-plot {
+  margin: 18px 20px 0;
+}
+
+.job-output-plot > span {
+  display: block;
+  margin-bottom: 7px;
+  color: #7a8c94;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.job-output-plot p {
+  margin: 0;
+  color: #5f737b;
+  font-size: 13px;
+}
+
+.job-output-plot .plotly-chart {
+  min-height: 340px;
+  width: 100%;
+}
+
 .job-warning {
   margin: 16px 20px 0;
   padding: 10px 12px;

@@ -64,6 +64,17 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def exocross_executable_available() -> bool:
+    if EXOCROSS_EXE is None or not EXOCROSS_EXE.is_file():
+        return False
+    try:
+        if EXOCROSS_EXE.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    return os.access(EXOCROSS_EXE, os.X_OK) or EXOCROSS_EXE.suffix.lower() == ".exe"
+
+
 BASE_DIR = Path(__file__).resolve().parent
 MASTER_FILE = Path(os.environ.get("EXOMOL_MASTER_FILE", str(BASE_DIR / "EXOMOL.master")))
 JOBS_BASE_DIR = Path(os.environ.get("EXOMOL_JOBS_DIR", str(get_default_jobs_dir())))
@@ -73,7 +84,19 @@ EXOCROSS_EXE = Path(os.environ["EXOCROSS_EXE"]) if os.environ.get("EXOCROSS_EXE"
 EXOCROSS_TIMEOUT_SECONDS = int(os.environ.get("EXOCROSS_TIMEOUT_SECONDS", "180"))
 AUTO_RUN_ON_SUBMIT = env_bool("EXOCROSS_AUTO_RUN", True)
 JOB_BUILDER_ENABLED = env_bool("EXOCROSS_JOB_BUILDER_ENABLED", False)
+EXOCROSS_MAX_NPOINTS = int(os.environ.get("EXOCROSS_MAX_NPOINTS", "10000"))
+EXOCROSS_MAX_RANGE_WIDTH = float(os.environ.get("EXOCROSS_MAX_RANGE_WIDTH", "10000"))
+EXOCROSS_MAX_TRANSITION_FILES = int(os.environ.get("EXOCROSS_MAX_TRANSITION_FILES", "3"))
 DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("EXOMOL_DOWNLOAD_TIMEOUT_SECONDS", "180"))
+LINE_LIST_DATA_DIR = (
+    Path(os.environ["EXOMOL_LINE_LIST_DATA_DIR"])
+    if os.environ.get("EXOMOL_LINE_LIST_DATA_DIR")
+    else (
+        Path(os.environ["EXOMOL_OPACITY_DATA_DIR"])
+        if os.environ.get("EXOMOL_OPACITY_DATA_DIR")
+        else None
+    )
+)
 TAUREX_H5_FILE = (
     Path(os.environ["TAUREX_H5_FILE"])
     if os.environ.get("TAUREX_H5_FILE")
@@ -124,6 +147,24 @@ class SubmitRequest(BaseModel):
     npoints: int = Field(gt=1)
     profile: Literal["Doppler"] = "Doppler"
     mass: float = Field(gt=0)
+
+
+def validate_submit_limits(payload: SubmitRequest) -> None:
+    if payload.rangeMax <= payload.rangeMin:
+        raise HTTPException(status_code=400, detail="rangeMax must be greater than rangeMin.")
+
+    if payload.npoints > EXOCROSS_MAX_NPOINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"npoints must be <= {EXOCROSS_MAX_NPOINTS}.",
+        )
+
+    range_width = payload.rangeMax - payload.rangeMin
+    if range_width > EXOCROSS_MAX_RANGE_WIDTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Spectral range width must be <= {EXOCROSS_MAX_RANGE_WIDTH:g} cm-1.",
+        )
 
 
 def slugify(value: str) -> str:
@@ -487,6 +528,93 @@ def discover_remote_dataset_files(
     }
 
 
+def discover_local_dataset_files(
+    molecule: str,
+    isotopologue: str,
+    line_list: str,
+    range_min: float,
+    range_max: float,
+) -> dict | None:
+    if LINE_LIST_DATA_DIR is None:
+        return None
+
+    dataset_dir = LINE_LIST_DATA_DIR / molecule / isotopologue / line_list
+    if not dataset_dir.is_dir():
+        return None
+
+    prefix = f"{isotopologue}__{line_list}"
+    all_items = [
+        {"name": item.name, "path": str(item)}
+        for item in dataset_dir.iterdir()
+        if item.is_file() and link_matches_dataset_file(item.name, prefix)
+    ]
+
+    states_item = choose_preferred_single_file(all_items, [".states.bz2", ".states"])
+    pf_item = choose_preferred_single_file(all_items, [".pf", ".pf.bz2"])
+
+    transition_items = [
+        item for item in all_items
+        if item["name"].endswith(".trans") or item["name"].endswith(".trans.bz2")
+    ]
+    transition_items = sort_transition_items(transition_items)
+    filtered_transition_items = [
+        item for item in transition_items
+        if transitions_overlap_range(item["name"], range_min, range_max)
+    ]
+    if filtered_transition_items:
+        transition_items = filtered_transition_items
+
+    return {
+        "source": "local",
+        "datasetPageUrl": str(dataset_dir),
+        "states": states_item,
+        "pf": pf_item,
+        "transitions": transition_items,
+        "allDiscoveredLinks": all_items,
+    }
+
+
+def discover_dataset_files(
+    molecule: str,
+    isotopologue: str,
+    line_list: str,
+    range_min: float,
+    range_max: float,
+) -> dict:
+    local_dataset = discover_local_dataset_files(
+        molecule=molecule,
+        isotopologue=isotopologue,
+        line_list=line_list,
+        range_min=range_min,
+        range_max=range_max,
+    )
+    if local_dataset is not None:
+        return local_dataset
+
+    remote_dataset = discover_remote_dataset_files(
+        molecule=molecule,
+        isotopologue=isotopologue,
+        line_list=line_list,
+        range_min=range_min,
+        range_max=range_max,
+    )
+    remote_dataset["source"] = "remote"
+    return remote_dataset
+
+
+def validate_transition_count(transition_items: list[dict]) -> None:
+    if len(transition_items) > EXOCROSS_MAX_TRANSITION_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Selected spectral range requires "
+                f"{len(transition_items)} transition files; this deployment allows "
+                f"at most {EXOCROSS_MAX_TRANSITION_FILES}. Narrow the range or ask "
+                "an administrator to raise EXOCROSS_MAX_TRANSITION_FILES."
+            ),
+        )
+
+
 def local_name_from_remote_name(remote_name: str) -> str:
     if remote_name.endswith(".bz2"):
         return remote_name[:-4]
@@ -508,6 +636,9 @@ def download_and_prepare_remote_file(
     remote_item: dict,
     job_dir: Path,
 ) -> dict:
+    if "path" in remote_item:
+        return prepare_local_dataset_file(remote_item, job_dir)
+
     remote_name = remote_item["name"]
     remote_url = remote_item["url"]
     local_name = local_name_from_remote_name(remote_name)
@@ -537,6 +668,39 @@ def download_and_prepare_remote_file(
     }
 
 
+def prepare_local_dataset_file(
+    local_item: dict,
+    job_dir: Path,
+) -> dict:
+    source_path = Path(local_item["path"])
+    source_name = local_item["name"]
+    local_name = local_name_from_remote_name(source_name)
+    local_path = job_dir / local_name
+
+    if local_path.exists():
+        return {
+            "remoteName": source_name,
+            "remoteUrl": str(source_path),
+            "sourcePath": str(source_path),
+            "localName": local_name,
+            "localPath": str(local_path),
+        }
+
+    if source_name.endswith(".bz2"):
+        with bz2.open(source_path, "rb") as src, open(local_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    else:
+        shutil.copy2(source_path, local_path)
+
+    return {
+        "remoteName": source_name,
+        "remoteUrl": str(source_path),
+        "sourcePath": str(source_path),
+        "localName": local_name,
+        "localPath": str(local_path),
+    }
+
+
 def download_and_prepare_dataset_files(
     remote_dataset: dict,
     job_dir: Path,
@@ -548,6 +712,8 @@ def download_and_prepare_dataset_files(
     states_item = remote_dataset.get("states")
     pf_item = remote_dataset.get("pf")
     transition_items = remote_dataset.get("transitions", [])
+
+    validate_transition_count(transition_items)
 
     if states_item is not None:
         states_local = download_and_prepare_remote_file(states_item, job_dir)
@@ -638,7 +804,7 @@ def run_exocross(
     input_filename: str,
     output_stem: str,
 ) -> dict:
-    if EXOCROSS_EXE is None or not EXOCROSS_EXE.exists():
+    if not exocross_executable_available():
         return {
             "status": "waiting_for_exocross",
             "message": "Input and dataset files are ready, but exocross executable is not configured.",
@@ -756,6 +922,7 @@ def build_job_response(metadata: dict) -> dict:
         "outputFileName": output_name,
         "outputFilePath": output_file,
         "outputDownloadUrl": f"/api/jobs/{metadata['jobId']}/output" if output_file else None,
+        "outputSpectrumUrl": f"/api/jobs/{metadata['jobId']}/spectrum" if output_file else None,
         "stdoutFilePath": stdout_file,
         "stderrFilePath": stderr_file,
         "stdoutDownloadUrl": f"/api/jobs/{metadata['jobId']}/stdout" if stdout_file else None,
@@ -763,6 +930,51 @@ def build_job_response(metadata: dict) -> dict:
         "returnCode": metadata.get("returnCode"),
         "createdAt": metadata.get("createdAt"),
         "runAttempted": metadata.get("runAttempted", False),
+    }
+
+
+def read_output_spectrum(output_path: Path, max_points: int) -> dict:
+    wavenumbers: list[float] = []
+    values: list[float] = []
+
+    for raw_line in output_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", "!", "*")):
+            continue
+
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+
+        try:
+            x_value = float(parts[0])
+            y_value = float(parts[1])
+        except ValueError:
+            continue
+
+        wavenumbers.append(x_value)
+        values.append(y_value)
+
+    if not wavenumbers:
+        raise HTTPException(
+            status_code=422,
+            detail="Output file could not be parsed as a two-column numeric spectrum.",
+        )
+
+    total_points = len(wavenumbers)
+    step = max(1, total_points // max_points)
+    sampled_wavenumbers = wavenumbers[::step]
+    sampled_values = values[::step]
+
+    if sampled_wavenumbers[-1] != wavenumbers[-1]:
+        sampled_wavenumbers.append(wavenumbers[-1])
+        sampled_values.append(values[-1])
+
+    return {
+        "points": len(sampled_wavenumbers),
+        "nativePoints": total_points,
+        "wavenumber": sampled_wavenumbers,
+        "crossSection": sampled_values,
     }
 
 
@@ -789,6 +1001,38 @@ def root() -> dict:
             "error": str(exc),
             "masterFile": str(MASTER_FILE),
         }
+
+
+@app.get("/api/runtime")
+def get_runtime() -> dict:
+    exocross_available = exocross_executable_available()
+    line_list_dir_available = LINE_LIST_DATA_DIR is not None and LINE_LIST_DATA_DIR.is_dir()
+
+    disabled_reason = None
+    if not JOB_BUILDER_ENABLED:
+        disabled_reason = (
+            "ExoCross job submission is disabled by server configuration. "
+            "Set EXOCROSS_JOB_BUILDER_ENABLED=true only for a controlled deployment."
+        )
+    elif AUTO_RUN_ON_SUBMIT and not exocross_available:
+        disabled_reason = (
+            "Job submission is enabled, but EXOCROSS_EXE does not point to a "
+            "working ExoCross executable."
+        )
+
+    return {
+        "jobBuilderEnabled": JOB_BUILDER_ENABLED,
+        "autoRunOnSubmit": AUTO_RUN_ON_SUBMIT,
+        "canRunExocross": exocross_available,
+        "disabledReason": disabled_reason,
+        "exocrossExe": str(EXOCROSS_EXE) if EXOCROSS_EXE else None,
+        "jobsBaseDir": str(JOBS_BASE_DIR),
+        "lineListDataDir": str(LINE_LIST_DATA_DIR) if LINE_LIST_DATA_DIR else None,
+        "lineListDataDirAvailable": line_list_dir_available,
+        "maxNpoints": EXOCROSS_MAX_NPOINTS,
+        "maxRangeWidth": EXOCROSS_MAX_RANGE_WIDTH,
+        "maxTransitionFiles": EXOCROSS_MAX_TRANSITION_FILES,
+    }
 
 
 @app.get("/api/options", include_in_schema=JOB_BUILDER_ENABLED)
@@ -963,8 +1207,7 @@ def get_taurex_opacity_spectrum(
 @app.post("/api/submit", include_in_schema=JOB_BUILDER_ENABLED)
 def submit_job(payload: SubmitRequest) -> dict:
     require_job_builder_enabled()
-    if payload.rangeMax <= payload.rangeMin:
-        raise HTTPException(status_code=400, detail="rangeMax must be greater than rangeMin.")
+    validate_submit_limits(payload)
 
     resolved = resolve_line_list(payload.molecule, payload.isotopologue, payload.lineList)
 
@@ -978,7 +1221,7 @@ def submit_job(payload: SubmitRequest) -> dict:
     discovery_error = None
 
     try:
-        remote_dataset = discover_remote_dataset_files(
+        remote_dataset = discover_dataset_files(
             molecule=payload.molecule,
             isotopologue=payload.isotopologue,
             line_list=payload.lineList,
@@ -986,6 +1229,8 @@ def submit_job(payload: SubmitRequest) -> dict:
             range_max=payload.rangeMax,
         )
         download_result = download_and_prepare_dataset_files(remote_dataset, job_dir)
+    except HTTPException:
+        raise
     except Exception as exc:
         discovery_error = str(exc)
         download_result = {
@@ -1082,7 +1327,7 @@ def submit_job(payload: SubmitRequest) -> dict:
 def get_job(job_id: str) -> dict:
     require_job_builder_enabled()
     _, metadata = load_job_metadata(job_id)
-    return metadata
+    return build_job_response(metadata)
 
 
 @app.get("/api/jobs/{job_id}/input", include_in_schema=JOB_BUILDER_ENABLED)
@@ -1118,6 +1363,35 @@ def download_output_file(job_id: str):
         media_type="text/plain",
         filename=output_path.name,
     )
+
+
+@app.get("/api/jobs/{job_id}/spectrum", include_in_schema=JOB_BUILDER_ENABLED)
+def get_job_output_spectrum(
+    job_id: str,
+    max_points: int = Query(2000, alias="maxPoints", ge=100, le=5000),
+) -> dict:
+    require_job_builder_enabled()
+    _, metadata = load_job_metadata(job_id)
+    output_file = metadata.get("outputFile")
+    if not output_file:
+        raise HTTPException(status_code=404, detail="Output file not found.")
+
+    output_path = Path(output_file)
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Output file not found.")
+
+    payload = read_output_spectrum(output_path, max_points)
+    payload.update(
+        {
+            "jobId": job_id,
+            "outputFileName": output_path.name,
+            "temperature": metadata.get("request", {}).get("temperature"),
+            "molecule": metadata.get("request", {}).get("molecule"),
+            "isotopologue": metadata.get("request", {}).get("isotopologue"),
+            "lineList": metadata.get("request", {}).get("lineList"),
+        }
+    )
+    return payload
 
 
 @app.get("/api/jobs/{job_id}/stdout", include_in_schema=JOB_BUILDER_ENABLED)

@@ -33,6 +33,10 @@ export function getOptions() {
   return request("/api/options");
 }
 
+export function getRuntime() {
+  return request("/api/runtime");
+}
+
 export function getOpacityCatalog() {
   return request("/api/opacities/catalog");
 }
@@ -72,6 +76,15 @@ export function submitJob(payload) {
     },
     body: JSON.stringify(payload),
   });
+}
+
+export function getJob(jobId) {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function getJobSpectrum(jobId, maxPoints = 2000) {
+  const query = new URLSearchParams({ maxPoints: String(maxPoints) });
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/spectrum?${query}`);
 }
 
 export { API_BASE_URL };
