@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -23,18 +23,22 @@ from pydantic import BaseModel, Field
 try:
     from .opacity import get_opacity_options, get_opacity_spectrum
     from .opacity_catalog import (
+        catalog_cache_status,
         catalog_source,
         discover_opacity_molecules,
         discover_taurex_datasets,
         download_taurex_file,
+        refresh_opacity_catalog,
     )
 except ImportError:
     from opacity import get_opacity_options, get_opacity_spectrum
     from opacity_catalog import (
+        catalog_cache_status,
         catalog_source,
         discover_opacity_molecules,
         discover_taurex_datasets,
         download_taurex_file,
+        refresh_opacity_catalog,
     )
 
 
@@ -88,6 +92,7 @@ EXOCROSS_MAX_NPOINTS = int(os.environ.get("EXOCROSS_MAX_NPOINTS", "10000"))
 EXOCROSS_MAX_RANGE_WIDTH = float(os.environ.get("EXOCROSS_MAX_RANGE_WIDTH", "10000"))
 EXOCROSS_MAX_TRANSITION_FILES = int(os.environ.get("EXOCROSS_MAX_TRANSITION_FILES", "3"))
 DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("EXOMOL_DOWNLOAD_TIMEOUT_SECONDS", "180"))
+ADMIN_TOKEN = os.environ.get("EXOMOL_ADMIN_TOKEN") or os.environ.get("ADMIN_TOKEN")
 LINE_LIST_DATA_DIR = (
     Path(os.environ["EXOMOL_LINE_LIST_DATA_DIR"])
     if os.environ.get("EXOMOL_LINE_LIST_DATA_DIR")
@@ -135,6 +140,18 @@ def require_job_builder_enabled() -> None:
             status_code=404,
             detail="ExoCross job preparation is disabled in this deployment.",
         )
+
+
+def require_admin_token(authorization: str | None) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin catalogue refresh is not configured on this deployment.",
+        )
+
+    expected = f"Bearer {ADMIN_TOKEN}"
+    if authorization != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin token.")
 
 
 class SubmitRequest(BaseModel):
@@ -1133,6 +1150,34 @@ def get_taurex_opacity_catalog() -> dict:
     return {
         "molecules": molecules,
         "source": catalog_source(),
+        "cache": catalog_cache_status(),
+    }
+
+
+@app.get("/api/opacities/catalog/status")
+def get_opacity_catalog_status() -> dict:
+    return catalog_cache_status()
+
+
+@app.post("/api/admin/catalog/refresh")
+def refresh_opacity_catalog_cache(
+    authorization: str | None = Header(None),
+) -> dict:
+    require_admin_token(authorization)
+    try:
+        payload = refresh_opacity_catalog()
+    except (requests.RequestException, ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to refresh opacity catalogue: {exc}",
+        ) from exc
+
+    return {
+        "message": "Opacity catalogue refreshed.",
+        "generatedAt": payload["generatedAt"],
+        "source": payload["source"],
+        "sourceMode": payload["sourceMode"],
+        "supportedDatasetCount": payload["supportedDatasetCount"],
     }
 
 

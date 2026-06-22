@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import RLock
 from urllib.parse import unquote, urljoin, urlparse
 
 import h5py
@@ -27,6 +31,7 @@ HTTP_HEADERS = {
 }
 SAFE_SLUG = re.compile(r"^[A-Za-z0-9_+\-]+$")
 TAUREX_SUFFIX = ".xsec.TauREx.h5"
+REQUIRED_TAUREX_DATASETS = {"mol_name", "key_iso_ll", "t", "p", "bin_edges", "xsecarr"}
 DEFAULT_OPACITY_LINKS_FILE = Path(__file__).resolve().parent / "opacity-links.txt"
 EXOMOL_OPACITY_LINKS_FILE = (
     Path(os.environ["EXOMOL_OPACITY_LINKS_FILE"]).expanduser()
@@ -38,6 +43,27 @@ EXOMOL_OPACITY_DATA_DIR = (
     if os.environ.get("EXOMOL_OPACITY_DATA_DIR")
     else None
 )
+DEFAULT_CACHE_DIR = Path(
+    os.environ.get(
+        "TAUREX_H5_CACHE_DIR",
+        str(Path(__file__).resolve().parent / "opacity_data"),
+    )
+)
+EXOMOL_OPACITY_CATALOG_CACHE_FILE = Path(
+    os.environ.get(
+        "EXOMOL_OPACITY_CATALOG_CACHE_FILE",
+        str(DEFAULT_CACHE_DIR / "opacity_catalog.json"),
+    )
+).expanduser()
+EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS = int(
+    os.environ.get("EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS", str(24 * 60 * 60))
+)
+EXOMOL_OPACITY_CATALOG_CACHE_ENABLED = (
+    os.environ.get("EXOMOL_OPACITY_CATALOG_CACHE_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+CATALOG_CACHE_VERSION = 1
+CATALOG_CACHE_LOCK = RLock()
 
 
 def configured_local_data_dir() -> Path | None:
@@ -74,6 +100,138 @@ def catalog_source() -> str:
     return f"{EXOMOL_OPACITY_BASE}/"
 
 
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def clear_catalog_memory_caches() -> None:
+    discover_local_taurex_catalog.cache_clear()
+    discover_link_file_taurex_catalog.cache_clear()
+
+
+def configured_cache_file() -> Path:
+    return EXOMOL_OPACITY_CATALOG_CACHE_FILE
+
+
+def read_catalog_cache(cache_file: Path | None = None) -> dict | None:
+    cache_path = cache_file or configured_cache_file()
+    if not cache_path.is_file():
+        return None
+
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if payload.get("version") != CATALOG_CACHE_VERSION:
+        return None
+    if not isinstance(payload.get("datasets"), list):
+        return None
+    return payload
+
+
+def catalog_cache_is_fresh(payload: dict) -> bool:
+    generated_epoch = payload.get("generatedAtEpoch")
+    if not isinstance(generated_epoch, (int, float)):
+        return False
+    return (time.time() - generated_epoch) <= EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS
+
+
+def write_catalog_cache(payload: dict, cache_file: Path | None = None) -> None:
+    cache_path = cache_file or configured_cache_file()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_name(cache_path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    temporary.replace(cache_path)
+
+
+def build_catalog_cache_payload(datasets: list[dict], source_mode: str) -> dict:
+    return {
+        "version": CATALOG_CACHE_VERSION,
+        "generatedAt": now_utc_iso(),
+        "generatedAtEpoch": time.time(),
+        "source": catalog_source(),
+        "sourceMode": source_mode,
+        "cacheTtlSeconds": EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS,
+        "supportedDatasetCount": len(datasets),
+        "datasets": datasets,
+    }
+
+
+def scan_configured_catalog() -> dict:
+    local_dir = configured_local_data_dir()
+    links_file = configured_opacity_links_file()
+
+    clear_catalog_memory_caches()
+
+    if local_dir is not None:
+        datasets = [dict(dataset) for dataset in discover_local_taurex_catalog(str(local_dir))]
+        return build_catalog_cache_payload(datasets, "local-data-dir")
+
+    if links_file is not None:
+        datasets = [
+            dict(dataset)
+            for dataset in discover_link_file_taurex_catalog(str(links_file), "")
+        ]
+        return build_catalog_cache_payload(datasets, "link-file")
+
+    raise ValueError("No cacheable opacity catalogue source is configured.")
+
+
+def catalog_cache_source_available() -> bool:
+    return configured_local_data_dir() is not None or configured_opacity_links_file() is not None
+
+
+def get_catalog_cache_payload(force_refresh: bool = False) -> dict:
+    if not catalog_cache_source_available():
+        raise ValueError("No cacheable opacity catalogue source is configured.")
+
+    with CATALOG_CACHE_LOCK:
+        if EXOMOL_OPACITY_CATALOG_CACHE_ENABLED and not force_refresh:
+            cached = read_catalog_cache()
+            if cached is not None and catalog_cache_is_fresh(cached):
+                return cached
+
+        payload = scan_configured_catalog()
+        if EXOMOL_OPACITY_CATALOG_CACHE_ENABLED:
+            write_catalog_cache(payload)
+        return payload
+
+
+def refresh_opacity_catalog() -> dict:
+    return get_catalog_cache_payload(force_refresh=True)
+
+
+def catalog_cache_status() -> dict:
+    cache_file = configured_cache_file()
+    cached = read_catalog_cache(cache_file)
+    return {
+        "enabled": EXOMOL_OPACITY_CATALOG_CACHE_ENABLED,
+        "cacheFile": str(cache_file),
+        "exists": cache_file.is_file(),
+        "fresh": catalog_cache_is_fresh(cached) if cached else False,
+        "ttlSeconds": EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS,
+        "generatedAt": cached.get("generatedAt") if cached else None,
+        "source": cached.get("source") if cached else catalog_source(),
+        "sourceMode": cached.get("sourceMode") if cached else None,
+        "supportedDatasetCount": cached.get("supportedDatasetCount") if cached else None,
+    }
+
+
+def molecules_from_datasets(datasets: list[dict]) -> list[dict]:
+    molecules: dict[str, str] = {}
+    for dataset in datasets:
+        key = dataset["molecule"]
+        molecules[key] = key.replace("_p", "+")
+    return [
+        {"key": key, "label": label}
+        for key, label in sorted(molecules.items(), key=lambda item: item[1].lower())
+    ]
+
+
 def label_to_key(label: str) -> str:
     return label.replace("+", "_p")
 
@@ -94,6 +252,12 @@ def read_hdf5_text(handle: h5py.File, name: str) -> str | None:
     if hasattr(value, "flat"):
         value = value.flat[0]
     return decode_hdf5_scalar(value)
+
+
+def validate_local_taurex_file(handle: h5py.File) -> None:
+    missing = sorted(REQUIRED_TAUREX_DATASETS.difference(handle.keys()))
+    if missing:
+        raise ValueError("Missing required TauREx datasets: " + ", ".join(missing))
 
 
 def parse_configuration(filename: str) -> str:
@@ -264,10 +428,11 @@ def build_local_dataset_record(path: Path, root: Path) -> dict | None:
 
     try:
         with h5py.File(path, "r") as handle:
+            validate_local_taurex_file(handle)
             molecule_label = read_hdf5_text(handle, "mol_name") or molecule_label
             key_iso_ll = read_hdf5_text(handle, "key_iso_ll")
-    except OSError:
-        key_iso_ll = None
+    except (OSError, ValueError):
+        return None
 
     if key_iso_ll and "__" in key_iso_ll:
         isotopologue, line_list = key_iso_ll.split("__", 1)
@@ -398,14 +563,10 @@ def discover_link_file_taurex_datasets(
     ]
 
 
-@lru_cache(maxsize=1)
 def discover_opacity_molecules() -> list[dict]:
-    links_file = configured_opacity_links_file()
-    local_dir = configured_local_data_dir()
-    if links_file is not None:
-        return discover_link_file_opacity_molecules(links_file, local_dir)
-    if local_dir is not None:
-        return discover_local_opacity_molecules(local_dir)
+    if catalog_cache_source_available():
+        payload = get_catalog_cache_payload()
+        return molecules_from_datasets(payload["datasets"])
 
     html_text = fetch_html(f"{EXOMOL_OPACITY_BASE}/")
     molecule_slugs = parse_immediate_children(
@@ -421,14 +582,16 @@ def discover_opacity_molecules() -> list[dict]:
     ]
 
 
-@lru_cache(maxsize=128)
 def discover_taurex_datasets(molecule: str) -> list[dict]:
-    links_file = configured_opacity_links_file()
-    local_dir = configured_local_data_dir()
-    if links_file is not None:
-        return discover_link_file_taurex_datasets(molecule, links_file, local_dir)
-    if local_dir is not None:
-        return discover_local_taurex_datasets(molecule, local_dir)
+    if catalog_cache_source_available():
+        if not SAFE_SLUG.fullmatch(molecule):
+            raise ValueError("Invalid molecule identifier.")
+        payload = get_catalog_cache_payload()
+        return [
+            dict(dataset)
+            for dataset in payload["datasets"]
+            if dataset["molecule"] == molecule
+        ]
 
     if not SAFE_SLUG.fullmatch(molecule):
         raise ValueError("Invalid molecule identifier.")

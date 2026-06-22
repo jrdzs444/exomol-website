@@ -33,6 +33,8 @@ container proxies `/api` requests to the backend container.
 
 - Reads the ExoMolOP opacity catalogue dynamically rather than hard-coding
   molecule and dataset options.
+- Caches the generated opacity catalogue as JSON so dropdowns remain fast while
+  still reflecting server-side data updates after refresh.
 - Ships with Christian Hill's `backend/opacity-links.txt` catalogue, filtering it
   to currently supported `.xsec.TauREx.h5` files.
 - Can use a server-local HDF5 data directory when `EXOMOL_OPACITY_DATA_DIR` is
@@ -77,6 +79,8 @@ podman run -d \
   -e EXOMOL_OPACITY_DATA_DIR=/data/exomol3_data \
   -e EXOMOL_JOBS_DIR=/data/jobs \
   -e TAUREX_H5_CACHE_DIR=/data/opacities \
+  -e EXOMOL_OPACITY_CATALOG_CACHE_FILE=/data/opacities/opacity_catalog.json \
+  -e EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS=86400 \
   -e EXOCROSS_JOB_BUILDER_ENABLED=false \
   -e EXOCROSS_AUTO_RUN=false \
   -v /mnt/data/exomol/exomol3_data:/data/exomol3_data:ro,Z \
@@ -133,6 +137,8 @@ podman run -d \
   -e EXOMOL_OPACITY_DATA_DIR=/data/exomol3_data \
   -e EXOMOL_JOBS_DIR=/data/jobs \
   -e TAUREX_H5_CACHE_DIR=/data/opacities \
+  -e EXOMOL_OPACITY_CATALOG_CACHE_FILE=/data/opacities/opacity_catalog.json \
+  -e EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS=86400 \
   -e EXOCROSS_JOB_BUILDER_ENABLED=false \
   -v /mnt/data/exomol/exomol3_data:/data/exomol3_data:ro,Z \
   -v /mnt/data/rundongji/jobs:/data/jobs:Z \
@@ -140,11 +146,19 @@ podman run -d \
   exomol-opacity-app-backend
 ```
 
-When `EXOMOL_OPACITY_DATA_DIR` is set, selected spectra are read directly from
-disk whenever the bundled catalogue entry maps to an existing local file. When
-it is not set, the app uses the same catalogue to download selected HDF5 files
-into the cache directory. You can replace or refresh the catalogue by mounting a
-new file and setting `EXOMOL_OPACITY_LINKS_FILE`.
+When `EXOMOL_OPACITY_DATA_DIR` is set, the backend treats that server directory
+as the primary source of truth for supported TauREx HDF5 cross-section files.
+When it is not set, the backend falls back to the bundled
+`backend/opacity-links.txt` catalogue and downloads selected HDF5 files into the
+cache directory. You can replace or refresh the link catalogue by mounting a new
+file and setting `EXOMOL_OPACITY_LINKS_FILE`.
+
+The production visualiser uses a backend-generated catalogue cache for the
+dropdowns. The backend scans the configured server data directory for supported
+`*.xsec.TauREx.h5` files, writes the result atomically to
+`EXOMOL_OPACITY_CATALOG_CACHE_FILE`, and serves the frontend dropdowns from that
+cache until the TTL expires. This keeps user requests fast while still allowing
+new ExoMol data files to appear automatically after the next refresh.
 
 ## Development Without Docker
 
@@ -196,6 +210,14 @@ podman logs backend
   backend uses the bundled `backend/opacity-links.txt` file when present.
 - `EXOMOL_OPACITY_LINK_BASE`: base URL for relative catalogue paths, defaulting
   to `https://exomol.com`.
+- `EXOMOL_OPACITY_CATALOG_CACHE_FILE`: JSON cache file used by the visualiser
+  dropdown catalogue.
+- `EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS`: cache lifetime before the backend
+  rescans the configured catalogue source. Defaults to one day.
+- `EXOMOL_OPACITY_CATALOG_CACHE_ENABLED`: set to `false` to disable persistent
+  catalogue caching.
+- `EXOMOL_ADMIN_TOKEN`: optional bearer token for `POST
+  /api/admin/catalog/refresh`.
 - `EXOMOL_OPACITY_BASE`: ExoMolOP web catalogue URL used when no local data
   directory or link-file catalogue is configured.
 - `EXOMOL_DOWNLOAD_TIMEOUT_SECONDS`: remote download timeout.

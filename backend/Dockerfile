@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TAUREX_H5_CACHE_DIR=/data/opacities \
+    EXOMOL_OPACITY_CATALOG_CACHE_FILE=/data/opacities/opacity_catalog.json
 
 WORKDIR /app
 

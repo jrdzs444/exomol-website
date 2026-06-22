@@ -7,6 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+import backend.opacity_catalog as opacity_catalog
 from backend.opacity_catalog import (
     build_link_file_dataset_record,
     discover_link_file_opacity_molecules,
@@ -19,6 +20,16 @@ from backend.opacity_catalog import (
 
 
 class OpacityCatalogTests(unittest.TestCase):
+    def write_taurex_file(self, path: Path, molecule: bytes, key_iso_ll: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("mol_name", data=[molecule])
+            handle.create_dataset("key_iso_ll", data=[key_iso_ll])
+            handle.create_dataset("t", data=np.array([300.0]))
+            handle.create_dataset("p", data=np.array([1.0]))
+            handle.create_dataset("bin_edges", data=np.arange(2))
+            handle.create_dataset("xsecarr", data=np.zeros((1, 1, 2)))
+
     def test_immediate_children_ignore_navigation_and_deeper_links(self) -> None:
         html = """
         <a href="/data/data-types/opacity/">Opacity home</a>
@@ -74,14 +85,7 @@ class OpacityCatalogTests(unittest.TestCase):
                 / "Rivlin"
                 / "23Na-1H__Rivlin.R15000_0.3-50mu.xsec.TauREx.h5"
             )
-            path.parent.mkdir(parents=True)
-            with h5py.File(path, "w") as handle:
-                handle.create_dataset("mol_name", data=[b"NaH"])
-                handle.create_dataset("key_iso_ll", data=[b"23Na-1H__Rivlin"])
-                handle.create_dataset("t", data=np.array([300.0]))
-                handle.create_dataset("p", data=np.array([1.0]))
-                handle.create_dataset("bin_edges", data=np.arange(2))
-                handle.create_dataset("xsecarr", data=np.zeros((1, 1, 2)))
+            self.write_taurex_file(path, b"NaH", b"23Na-1H__Rivlin")
 
             molecules = discover_local_opacity_molecules(root)
             datasets = discover_local_taurex_datasets("NaH", root)
@@ -90,6 +94,81 @@ class OpacityCatalogTests(unittest.TestCase):
             self.assertEqual(len(datasets), 1)
             self.assertEqual(datasets[0]["sourceType"], "local")
             self.assertEqual(datasets[0]["localPath"], str(path))
+
+    def test_catalog_cache_refreshes_from_local_data_dir(self) -> None:
+        previous_data_dir = opacity_catalog.EXOMOL_OPACITY_DATA_DIR
+        previous_links_file = opacity_catalog.EXOMOL_OPACITY_LINKS_FILE
+        previous_cache_file = opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_FILE
+        previous_cache_enabled = opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_ENABLED
+        previous_ttl = opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                local_data = root / "exomol3_data"
+                cache_file = root / "cache" / "opacity_catalog.json"
+                first_file = (
+                    local_data
+                    / "NaH"
+                    / "23Na-1H"
+                    / "Rivlin"
+                    / "23Na-1H__Rivlin.R15000_0.3-50mu.xsec.TauREx.h5"
+                )
+                second_file = (
+                    local_data
+                    / "HCN"
+                    / "1H-12C-14N"
+                    / "Harris"
+                    / "1H-12C-14N__Harris.R15000_0.3-50mu.xsec.TauREx.h5"
+                )
+                self.write_taurex_file(first_file, b"NaH", b"23Na-1H__Rivlin")
+
+                opacity_catalog.EXOMOL_OPACITY_DATA_DIR = local_data
+                opacity_catalog.EXOMOL_OPACITY_LINKS_FILE = None
+                opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_FILE = cache_file
+                opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_ENABLED = True
+                opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
+                opacity_catalog.clear_catalog_memory_caches()
+
+                molecules = opacity_catalog.discover_opacity_molecules()
+
+                self.assertEqual(molecules, [{"key": "NaH", "label": "NaH"}])
+                self.assertTrue(cache_file.is_file())
+
+                self.write_taurex_file(second_file, b"HCN", b"1H-12C-14N__Harris")
+                opacity_catalog.refresh_opacity_catalog()
+                molecules = opacity_catalog.discover_opacity_molecules()
+
+                self.assertEqual(
+                    molecules,
+                    [
+                        {"key": "HCN", "label": "HCN"},
+                        {"key": "NaH", "label": "NaH"},
+                    ],
+                )
+        finally:
+            opacity_catalog.EXOMOL_OPACITY_DATA_DIR = previous_data_dir
+            opacity_catalog.EXOMOL_OPACITY_LINKS_FILE = previous_links_file
+            opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_FILE = previous_cache_file
+            opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_ENABLED = previous_cache_enabled
+            opacity_catalog.EXOMOL_OPACITY_CATALOG_CACHE_TTL_SECONDS = previous_ttl
+            opacity_catalog.clear_catalog_memory_caches()
+
+    def test_local_scan_excludes_invalid_hdf5_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = (
+                root
+                / "NaH"
+                / "23Na-1H"
+                / "Rivlin"
+                / "23Na-1H__Rivlin.R15000_0.3-50mu.xsec.TauREx.h5"
+            )
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"not an hdf5 file")
+
+            self.assertEqual(discover_local_opacity_molecules(root), [])
+            self.assertEqual(discover_local_taurex_datasets("NaH", root), [])
 
     def test_link_file_parser_filters_taurex_cross_sections(self) -> None:
         record = build_link_file_dataset_record(
